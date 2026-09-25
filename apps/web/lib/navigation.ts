@@ -190,6 +190,7 @@ export const APP_ROUTES: readonly AppRoute[] = [
     requirements: requires('/obras/[siteId]', ['site.read'], 'all'),
     stage: 'W4',
     needsSite: true,
+    navHidden: true,
   },
 ];
 

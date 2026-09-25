@@ -246,20 +246,21 @@ test('nav: cada rol ve solo lo que puede alcanzar', () => {
   assert.equal(medico.includes('/obras'), false);
 
   // The construction roles hold `site.read`, so the obras section entry and the
-  // two static screens of the vertical (empresa board, ficha) are advertised;
-  // the CSV importers need `site.write` or `assignment.write` and stay out.
+  // static empresa board are advertised; the site detail screen is `navHidden`
+  // (a nav link would carry the literal `[siteId]` segment) and the CSV
+  // importers need `site.write` or `assignment.write` and stay out.
   const trabajador = navItemsFor('trabajador').map((route) => route.path);
-  assert.deepEqual(trabajador, ['/', '/obras', '/obras/tablero', '/obras/[siteId]']);
+  assert.deepEqual(trabajador, ['/', '/obras', '/obras/tablero']);
   assert.equal(trabajador.includes('/obras/imports'), false);
   assert.equal(trabajador.includes('/salud/imports'), false);
 
   const gerente = navItemsFor('gerente').map((route) => route.path);
-  assert.deepEqual(gerente, ['/', '/obras', '/obras/tablero', '/obras/imports', '/obras/[siteId]']);
+  assert.deepEqual(gerente, ['/', '/obras', '/obras/tablero', '/obras/imports']);
 
   // Jefatura de obra holds `assignment.write` but not `site.write`: the import
   // entry is `any`, so it is advertised for the workers load it may run.
   const jefeObra = navItemsFor('jefe_obra').map((route) => route.path);
-  assert.deepEqual(jefeObra, ['/', '/obras', '/obras/tablero', '/obras/imports', '/obras/[siteId]']);
+  assert.deepEqual(jefeObra, ['/', '/obras', '/obras/tablero', '/obras/imports']);
 
   const vendedor = navItemsFor('vendedor').map((route) => route.path);
   assert.deepEqual(vendedor, ['/']);
