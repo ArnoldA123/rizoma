@@ -30,8 +30,9 @@ import {
   newProxyTraceId,
   resolveUpstreamPath,
 } from '@/lib/proxy';
-import { API_ORIGIN, DEV_HEADERS_ENABLED } from '@/lib/server-config';
-import { decodeSession, sessionIsExpired } from '@/lib/session-codec';
+import { REFRESH_COOKIE, ensureFreshAccessToken, type PersistedRefresh } from '@/lib/refresh';
+import { API_ORIGIN, DEV_HEADERS_ENABLED, WEB_ORIGIN } from '@/lib/server-config';
+import { sessionCookieOptions } from '@/lib/session-codec';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -44,6 +45,16 @@ function errorResponse(status: number, code: string, message: string, traceId: s
     { code, message, traceId },
     { status, headers: { 'cache-control': 'no-store', [TRACE_ID_HEADER]: traceId } },
   );
+}
+
+/** Re-persists a renewed token set on the outgoing response, if any. */
+function persistRenewal(response: NextResponse, renewed: PersistedRefresh | null): void {
+  if (renewed === null) return;
+  const options = sessionCookieOptions(WEB_ORIGIN, renewed.maxAgeSeconds);
+  response.cookies.set(SESSION_COOKIE, renewed.sessionCookieValue, options);
+  if (renewed.refreshCookieValue !== null) {
+    response.cookies.set(REFRESH_COOKIE, renewed.refreshCookieValue, options);
+  }
 }
 
 async function handle(request: NextRequest, path: readonly string[]): Promise<NextResponse> {
@@ -72,8 +83,35 @@ async function handle(request: NextRequest, path: readonly string[]): Promise<Ne
     );
   }
 
-  const stored = decodeSession(request.cookies.get(SESSION_COOKIE)?.value);
-  const accessToken = stored !== null && !sessionIsExpired(stored) ? stored.accessToken : null;
+  const ensured = await ensureFreshAccessToken({
+    get: (name) => request.cookies.get(name)?.value,
+  });
+
+  // A rejected or missing refresh ends the session here: both cookies are
+  // cleared so the next page load falls through to `/login`. An unreachable
+  // realm is transient and must not clear stored credentials.
+  if (ensured.status === 'unauthorized' && ensured.clearCookies) {
+    if (ensured.reason === 'refresh-unreachable') {
+      return errorResponse(
+        502,
+        'auth.refresh_unreachable',
+        'El realm no está disponible para renovar la sesión.',
+        traceId,
+      );
+    }
+    const loggedOut = errorResponse(
+      401,
+      'auth.session_expired',
+      'La sesión venció y no pudo renovarse; vuelva a iniciar sesión.',
+      traceId,
+    );
+    loggedOut.cookies.delete(SESSION_COOKIE);
+    loggedOut.cookies.delete(REFRESH_COOKIE);
+    return loggedOut;
+  }
+
+  const accessToken = ensured.status === 'unauthorized' ? null : ensured.accessToken;
+  const renewed: PersistedRefresh | null = ensured.status === 'refreshed' ? ensured : null;
 
   const headers = buildUpstreamHeaders({
     accessToken,
@@ -109,21 +147,25 @@ async function handle(request: NextRequest, path: readonly string[]): Promise<Ne
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    return errorResponse(
+    const unreachable = errorResponse(
       502,
       TRANSPORT_ERROR_CODE,
       `No se pudo alcanzar el API (${API_ORIGIN}): ${detail}`,
       traceId,
     );
+    persistRenewal(unreachable, renewed);
+    return unreachable;
   }
 
   const responseHeaders = new Headers();
   copyResponseHeaders(upstream.headers, responseHeaders, traceId);
   const payload = await upstream.arrayBuffer();
-  return new NextResponse(payload.byteLength === 0 ? null : payload, {
+  const outgoing = new NextResponse(payload.byteLength === 0 ? null : payload, {
     status: upstream.status,
     headers: responseHeaders,
   });
+  persistRenewal(outgoing, renewed);
+  return outgoing;
 }
 
 type RouteContext = { readonly params: Promise<{ readonly path: readonly string[] }> };
