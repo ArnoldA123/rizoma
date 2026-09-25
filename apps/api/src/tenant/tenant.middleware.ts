@@ -15,10 +15,18 @@
 // - `app.scopes` is stored as a space-delimited list (OAuth scope style), the
 //   shape endpoint code reads back with `current_setting('app.scopes')`.
 // - Identity comes from the verified Keycloak JWT when the request carries an
-//   `Authorization: Bearer <token>` header; the raw-header path below is kept
-//   only for local tests and non-browser tooling and is documented as such.
-//   Both paths converge on the same {@link TenantResolution} shape, so the RLS
-//   wiring is identity-source agnostic.
+//   `Authorization: Bearer <token>` header, or from a tenant API key when it
+//   carries `X-Api-Key: <opaque secret>` (W1, resolved per request through the
+//   `verify_api_key` SECURITY DEFINER function — no permission cache, so a
+//   revocation is effective on the next request, like memberships). The
+//   raw-header path below is kept only for local tests and non-browser tooling
+//   and is documented as such. All paths converge on the same
+//   {@link TenantResolution} shape, so the RLS wiring is identity-source
+//   agnostic. For API-key requests `userId` is the verified key id (a UUID),
+//   which is what `app.user_id` and the audit `actor` carry.
+// - A presented API key that does not verify is rejected with 401
+//   `auth.api_key_invalid` and never falls through to another identity source
+//   (fail closed, same as a presented bearer token).
 // - A request without a valid tenant never reaches the pool: it is rejected
 //   with 403 `{code:'tenant.missing'}` (mvp1-api-runtime exit criterion 2).
 //   A request that *does* carry a bearer token but fails verification is
@@ -31,6 +39,16 @@
 import type { NestMiddleware } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import {
+  API_KEY_HEADER,
+  API_KEY_INVALID_CODE,
+  verifyApiKey,
+} from '../auth/api-keys.ts';
+import {
+  buildUsageEndpoint,
+  recordApiKeyUsage,
+  shouldCountUsage,
+} from '../webhooks/usage-counters.ts';
 import {
   AUTH_ERROR_CODES,
   AuthError,
@@ -105,6 +123,10 @@ export interface TenantScopedRequest {
   headers?: HeaderRecord;
   tenant?: TenantContext;
   tenantClient?: TenantClient;
+  /** Verified API-key id for usage counting; null/undefined for JWT traffic. */
+  apiKeyId?: string | null;
+  readonly method?: string;
+  readonly path?: string;
 }
 
 /** Response surface the middleware needs to finalize the transaction. */
@@ -300,6 +322,15 @@ export class TenantContextMiddleware implements NestMiddleware {
     next: (error?: unknown) => void,
   ): Promise<void> {
     const headers = req.headers ?? {};
+
+    // W1: machine auth runs before Bearer. A presented key that does not
+    // verify is rejected inside `useApiKey` without touching other sources.
+    const apiKeySecret = readHeader(headers, API_KEY_HEADER);
+    if (apiKeySecret !== undefined) {
+      await this.useApiKey(req, res, next, headers, apiKeySecret);
+      return;
+    }
+
     const authorization = readHeader(headers, AUTHORIZATION_HEADER);
     let resolution: TenantResolution;
 
@@ -353,7 +384,94 @@ export class TenantContextMiddleware implements NestMiddleware {
       return;
     }
 
-    req.tenant = resolution.context;
+    this.bindClient(req, res, next, client, resolution.context);
+  }
+
+  /**
+   * API-key branch: resolves the opaque secret through `verify_api_key` inside
+   * the request transaction, then binds the same RLS context as every other
+   * identity source. The key scopes feed `app.scopes`; the key id feeds
+   * `app.user_id` (a UUID, so the RLS cast holds). Unknown, revoked and
+   * out-of-window keys answer 401 and never fall through (fail closed).
+   */
+  private async useApiKey(
+    req: TenantScopedRequest,
+    res: TenantResponse,
+    next: (error?: unknown) => void,
+    headers: HeaderRecord,
+    secret: string,
+  ): Promise<void> {
+    let client: TenantClient;
+    try {
+      client = await this.pool.connect();
+    } catch (error) {
+      next(error);
+      return;
+    }
+
+    try {
+      await client.query('BEGIN');
+      const verified = await verifyApiKey(client, secret);
+      if (verified === null) {
+        await finalizeTransaction(client, 'ROLLBACK');
+        res.status(AUTH_UNAUTHORIZED_STATUS).json({
+          code: API_KEY_INVALID_CODE,
+          message: 'Unknown, revoked or expired API key',
+          traceId: resolveTraceId(headers),
+        });
+        return;
+      }
+      const context = {
+        tenantId: verified.tenantId,
+        userId: verified.keyId,
+        scopes: [...verified.scopes],
+      };
+      await client.query(SET_TENANT_ID_SQL, [context.tenantId]);
+      await client.query(SET_USER_ID_SQL, [context.userId]);
+      await client.query(SET_SCOPES_SQL, [context.scopes.join(' ')]);
+      req.apiKeyId = verified.keyId;
+      this.bindClient(req, res, next, client, context);
+    } catch (error) {
+      await finalizeTransaction(client, 'ROLLBACK');
+      next(error);
+    }
+  }
+
+  /**
+   * Best-effort hourly usage count for API-key traffic, on a short pool
+   * client — never the request transaction (already finalizing on finish).
+   * Failures resolve silently inside `recordApiKeyUsage`.
+   */
+  private countUsage(req: TenantScopedRequest, res: TenantResponse): void {
+    const tenantId = req.tenant?.tenantId;
+    const apiKeyId = req.apiKeyId ?? null;
+    if (tenantId === undefined || !shouldCountUsage(apiKeyId, res.statusCode)) return;
+    const endpoint = buildUsageEndpoint(req.method ?? '', req.path ?? '');
+    void (async () => {
+      let client: TenantClient | null = null;
+      try {
+        client = await this.pool.connect();
+        await recordApiKeyUsage(client, { tenantId, apiKeyId, endpoint });
+      } catch {
+        // best effort: counting never fails the business request
+      } finally {
+        client?.release();
+      }
+    })();
+  }
+
+  /**
+   * Binds the open transaction to the request and arms the commit/rollback
+   * finalizers shared by every identity branch.
+   */
+  private bindClient(
+    req: TenantScopedRequest,
+    res: TenantResponse,
+    next: (error?: unknown) => void,
+    client: TenantClient,
+    context: TenantContext,
+  ): void {
+    req.tenant = context;
     req.tenantClient = client;
 
     let settled = false;
@@ -365,7 +483,10 @@ export class TenantContextMiddleware implements NestMiddleware {
 
     // 5xx responses and aborted connections must not commit partial writes;
     // `settled` keeps 'finish' + 'close' from finalizing twice.
-    res.on('finish', () => finalize(res.statusCode >= 500));
+    res.on('finish', () => {
+      finalize(res.statusCode >= 500);
+      this.countUsage(req, res);
+    });
     res.on('close', () => finalize(true));
 
     next();
