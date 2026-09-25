@@ -69,6 +69,21 @@ export const APP_ROUTES: readonly AppRoute[] = [
     stage: 'W1',
   },
   {
+    // First-run setup wizard (H3). Open route (no actions) and `navHidden` on
+    // purpose: the run happens before any tenant exists, so it is a setup
+    // destination rather than a daily screen — and the pinned per-role nav
+    // lists in `test/access.test.ts` stay untouched. Reachable by URL and by
+    // `sanitizeNextPath` like any other registry entry.
+    path: '/onboarding',
+    label: 'Onboarding',
+    description: 'Alta inicial: organización, sedes, identidad, facturación, administración y acta.',
+    section: 'inicio',
+    skin: 'neutral',
+    requirements: requires('/onboarding', [], 'all'),
+    stage: 'H3',
+    navHidden: true,
+  },
+  {
     path: '/salud/pacientes',
     label: 'Pacientes',
     description: 'Ficha 360: cabecera, consentimientos, episodios y citas.',
