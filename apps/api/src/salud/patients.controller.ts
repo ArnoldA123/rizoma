@@ -9,19 +9,47 @@ import {
   createPatient,
   getPatient,
   listPatients,
+  listPatientsPage,
   updatePatient,
   type PatientRecord,
+  type SaludPage,
 } from './salud.service.ts';
+
+/** Paged envelope returned only when the caller sends `?cursor=` or `?limit=`. */
+export type PatientPage = SaludPage<PatientRecord>;
+
+/** Non-empty query param, or null when absent/blank (legacy bare-array path). */
+function readPageParam(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
 
 @Controller('salud/patients')
 export class PatientsController {
-  /** `GET /v1/salud/patients` — patient files inside the caller scope. */
+  /**
+   * `GET /v1/salud/patients` — patient files inside the caller scope.
+   * Without `?cursor=`/`?limit=` answers the legacy bare array (cap 200);
+   * with either, answers the keyset page `{rows, nextCursor}` ordered by
+   * `created_at DESC, id DESC`.
+   */
   @Get()
   list(
     @Req() req: TenantScopedRequest,
     @Query('saved_view_id') savedViewId?: string,
-  ): Promise<PatientRecord[]> {
-    return listPatients(actorFromRequest(req), savedViewId ?? null);
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ): Promise<PatientRecord[] | PatientPage> {
+    const pageCursor = readPageParam(cursor);
+    const pageLimit = readPageParam(limit);
+    if (pageCursor === null && pageLimit === null) {
+      return listPatients(actorFromRequest(req), savedViewId ?? null);
+    }
+    return listPatientsPage(actorFromRequest(req), {
+      savedViewId: savedViewId ?? null,
+      cursor: pageCursor,
+      limit: pageLimit,
+    });
   }
 
   /** `POST /v1/salud/patients` — register a patient file (`patient.write`). */

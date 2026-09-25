@@ -39,6 +39,67 @@ export const OBRA_MODULE = 'obras';
 /** Rows the list endpoints return at most; keeps a stray wide scan bounded. */
 export const OBRA_LIST_LIMIT = 200;
 
+// ============ keyset pagination (R1) ============
+
+/**
+ * Default/max page size for the keyset site listing; mirrors
+ * `PAGINATION_DEFAULT_LIMIT` / `PAGINATION_MAX_LIMIT` in
+ * `packages/contracts/src/pagination.ts`. The API keeps its own constants so
+ * the runtime has no cross-package import; the values must stay 200/200 on
+ * both sides.
+ */
+export const OBRA_PAGE_DEFAULT_LIMIT = OBRA_LIST_LIMIT;
+export const OBRA_PAGE_MAX_LIMIT = OBRA_LIST_LIMIT;
+
+/** `?cursor=` + `?limit=` input for the keyset site listing. */
+export interface ObraPageInput {
+  readonly cursor?: string | null;
+  readonly limit?: number | string | null;
+}
+
+/** One keyset page: the rows plus the opaque cursor for the next page (null = end). */
+export interface ObraPage<T> {
+  readonly rows: T[];
+  readonly nextCursor: string | null;
+}
+
+/** Normalizes `?limit=`: absent/empty uses 200, above 200 clamps, anything else outside 1..200 is a 400. */
+function parsePageLimit(raw: number | string | null | undefined, traceId: string): number {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+    return OBRA_PAGE_DEFAULT_LIMIT;
+  }
+  const parsed = typeof raw === 'number' ? raw : Number(raw.trim());
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw badRequest('limit must be an integer between 1 and 200', traceId);
+  }
+  return Math.min(parsed, OBRA_PAGE_MAX_LIMIT);
+}
+
+/** Encodes one ordering key as the opaque `nextCursor` (base64url JSON, same shape as `encodeCursor` in the contracts). */
+function encodePageCursor(payload: Record<string, string>): string {
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+/** Decodes `?cursor=` back to its ordering key; any malformed input is a 400. */
+function decodePageCursor(cursor: string, traceId: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown;
+  } catch {
+    throw badRequest('Invalid pagination cursor', traceId);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw badRequest('Invalid pagination cursor', traceId);
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'string' || value === '') throw badRequest('Invalid pagination cursor', traceId);
+    out[key] = value;
+  }
+  if (Object.keys(out).length === 0) throw badRequest('Invalid pagination cursor', traceId);
+  return out;
+}
+
 /**
  * Roles that reach a site without an assignment because their membership
  * subtree already bounds them to it: `gerente` at company scope and
@@ -763,6 +824,64 @@ export async function listSites(actor: ObraActorContext): Promise<SiteRecord[]> 
     [...facts.scopeSubtree],
   ]);
   return readRows(result).map(mapSite);
+}
+
+/**
+ * Keyset page of the sites inside the membership subtree (§3.4 "Ver obra").
+ *
+ * Stable order: `code ASC, id ASC` — the legacy `ORDER BY code` plus the
+ * `id` tiebreaker, so equal codes paginate deterministically (`code` is the
+ * tenant business key, unique in practice). The cursor is the opaque
+ * base64url of the last row's `{code, id}`; the query fetches `limit + 1`
+ * rows and a non-null `nextCursor` means there is another page.
+ */
+export async function listSitesPage(
+  actor: ObraActorContext,
+  options: ObraPageInput = {},
+): Promise<ObraPage<SiteRecord>> {
+  const limit = parsePageLimit(options.limit, actor.traceId);
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    action: 'site.read',
+    entity: 'site',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'site.list',
+    denied: (reason) => scopeDenied(reason, actor.traceId),
+  });
+  let cursorCode: string | null = null;
+  let cursorId: string | null = null;
+  const rawCursor = typeof options.cursor === 'string' ? options.cursor.trim() : '';
+  if (rawCursor !== '') {
+    const payload = decodePageCursor(rawCursor, actor.traceId);
+    cursorCode = payload.code ?? null;
+    cursorId = payload.id ?? null;
+    if (cursorCode === null || cursorId === null) {
+      throw badRequest('Invalid pagination cursor', actor.traceId);
+    }
+    if (!UUID_RE.test(cursorId)) throw badRequest('Invalid pagination cursor', actor.traceId);
+  }
+  const conditions = ['tenant_id = $1', 'org_node_id = ANY($2::uuid[])'];
+  const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  if (cursorCode !== null && cursorId !== null) {
+    values.push(cursorCode, cursorId);
+    const codeParam = values.length - 1;
+    const idParam = values.length;
+    conditions.push(
+      `(code > $${codeParam} OR (code = $${codeParam} AND id > $${idParam}::uuid))`,
+    );
+  }
+  const result = await actor.client.query(
+    `SELECT ${SITE_COLUMNS} FROM sites ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY code ASC, id ASC LIMIT ${limit + 1}`,
+    values,
+  );
+  const rows = readRows(result).map(mapSite);
+  if (rows.length <= limit) return { rows, nextCursor: null };
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  if (last === undefined) return { rows: page, nextCursor: null };
+  return { rows: page, nextCursor: encodePageCursor({ code: last.code, id: last.id }) };
 }
 
 /** Creates a site; only `gerente` holds `site.write` (§3.4). */

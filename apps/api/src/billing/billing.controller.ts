@@ -19,11 +19,15 @@ import {
   openCashSession,
   payInvoice,
   voidInvoice,
+  type BillingPage,
   type CashSessionRecord,
   type InvoiceRecord,
   type InvoiceWithFiscal,
   type QuoteRecord,
 } from './billing.service.ts';
+
+/** Paged envelope returned only when the caller sends `?cursor=` or `?limit=`. */
+export type InvoicePage = BillingPage<InvoiceRecord>;
 
 @Controller('billing')
 export class BillingController {
@@ -81,7 +85,12 @@ export class BillingController {
     return voidInvoice(actorFromRequest(req), id, body);
   }
 
-  /** `GET /v1/billing/invoices` — invoices inside the caller scope, capped at 200. */
+  /**
+   * `GET /v1/billing/invoices` — invoices inside the caller scope, capped at 200.
+   * Without `?cursor=`/`?limit=` answers the legacy bare array; with either,
+   * answers the keyset page `{rows, nextCursor}` ordered by
+   * `created_at DESC, id DESC`.
+   */
   @Get('invoices')
   invoices(
     @Req() req: TenantScopedRequest,
@@ -90,13 +99,17 @@ export class BillingController {
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('saved_view_id') savedViewId?: string,
-  ): Promise<InvoiceRecord[]> {
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ): Promise<InvoiceRecord[] | InvoicePage> {
     return listInvoices(actorFromRequest(req), {
       cashSession,
       status,
       from,
       to,
       saved_view_id: savedViewId,
+      cursor,
+      limit,
     });
   }
 
