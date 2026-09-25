@@ -39,6 +39,13 @@ const DATABASE_URL_PGBOUNCER =
   'postgresql://rizoma:rizoma_demo_password@127.0.0.1:6432/rizoma';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://:rizoma_demo_password@127.0.0.1:6379';
 
+/**
+ * CI guard against masking: with `REQUIRE_E2E_DB=1` the suite fails instead
+ * of skipping when the database is unreachable, so a green CI job always
+ * means the suite really ran. Local runs keep the historic skip.
+ */
+const REQUIRE_DB = process.env.REQUIRE_E2E_DB === '1';
+
 // ============ synthetic fixtures ============
 
 const TENANT_SALUD = 'a1000000-0000-4000-8000-000000000001';
@@ -292,7 +299,13 @@ describe('salud API e2e (local stack)', () => {
     db = new Client({ connectionString: DATABASE_URL });
     try {
       await db.connect();
-    } catch {
+    } catch (error) {
+      if (REQUIRE_DB) {
+        throw new Error(
+          'REQUIRE_E2E_DB=1 is set but the database is unreachable — refusing to skip',
+          { cause: error },
+        );
+      }
       return;
     }
     stackReady = true;
