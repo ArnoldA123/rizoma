@@ -869,6 +869,90 @@ export async function createQuote(actor: ActorContext, body: unknown): Promise<Q
   return quote;
 }
 
+/** Filters of `GET /v1/billing/invoices`: shift, commercial status, emission window. */
+export interface InvoiceListFilters {
+  readonly cashSessionId: string | null;
+  readonly status: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+}
+
+const INVOICE_LIST_STATUSES = ['draft', 'issued', 'partially_paid', 'paid', 'voided'] as const;
+
+function readOptionalFilter(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * Parses the query of `GET /v1/billing/invoices`. Every filter is optional and
+ * an empty string counts as absent; a malformed UUID, an unknown status or an
+ * unparsable date is a 400, never a silently ignored filter.
+ */
+export function parseInvoiceListFilters(query: unknown, traceId: string): InvoiceListFilters {
+  const record = asRecord(query);
+  const rawSession = readOptionalFilter(record.cashSession ?? record.cashSessionId);
+  if (rawSession !== null && !UUID_RE.test(rawSession)) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid cashSession: expected a UUID', 400, traceId);
+  }
+  const rawStatus = readOptionalFilter(record.status);
+  if (rawStatus !== null && !(INVOICE_LIST_STATUSES as readonly string[]).includes(rawStatus)) {
+    throw billingError(BILLING_ERROR.invalidParam, `Invalid status: ${rawStatus}`, 400, traceId);
+  }
+  const rawFrom = readOptionalFilter(record.from);
+  if (rawFrom !== null && Number.isNaN(Date.parse(rawFrom))) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid from: expected a date', 400, traceId);
+  }
+  const rawTo = readOptionalFilter(record.to);
+  if (rawTo !== null && Number.isNaN(Date.parse(rawTo))) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid to: expected a date', 400, traceId);
+  }
+  return { cashSessionId: rawSession, status: rawStatus, from: rawFrom, to: rawTo };
+}
+
+/**
+ * Invoices inside the membership subtree, newest first, capped at
+ * `BILLING_LIST_LIMIT`. Same read contract as `listQuotes`: the guard
+ * (`invoice.issue`) owns the denial audit and a successful read writes no
+ * audit row — reads are not writes (§4.4).
+ */
+export async function listInvoices(actor: ActorContext, query: unknown): Promise<InvoiceRecord[]> {
+  const filters = parseInvoiceListFilters(query, actor.traceId);
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    entity: 'invoice',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'invoice.list',
+  });
+  const conditions = ['tenant_id = $1', 'org_node_id = ANY($2::uuid[])'];
+  const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  if (filters.cashSessionId !== null) {
+    values.push(filters.cashSessionId);
+    conditions.push(`cash_session_id = $${values.length}`);
+  }
+  if (filters.status !== null) {
+    values.push(filters.status);
+    conditions.push(`status = $${values.length}`);
+  }
+  if (filters.from !== null) {
+    values.push(filters.from);
+    conditions.push(`COALESCE(issued_at, created_at) >= $${values.length}::timestamptz`);
+  }
+  if (filters.to !== null) {
+    values.push(filters.to);
+    conditions.push(`COALESCE(issued_at, created_at) <= $${values.length}::timestamptz`);
+  }
+  const result = await actor.client.query(
+    `SELECT ${INVOICE_COLUMNS} FROM invoices ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY created_at DESC LIMIT ${BILLING_LIST_LIMIT}`,
+    values,
+  );
+  return readRows(result).map(mapInvoice);
+}
+
 /** Quotes inside the membership subtree. */
 export async function listQuotes(actor: ActorContext): Promise<QuoteRecord[]> {
   const facts = await loadFacts(actor);

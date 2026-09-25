@@ -17,6 +17,7 @@ import {
   createQuote,
   getInvoiceWithFiscal,
   issueInvoice,
+  listInvoices,
   listQuotes,
   openCashSession,
   payInvoice,
@@ -88,6 +89,36 @@ interface FakeDb {
 function nextId(state: FakeState): string {
   state.sequence += 1;
   return `00000000-0000-4000-8000-${String(state.sequence).padStart(12, '0')}`;
+}
+
+function seedInvoice(state: FakeState, overrides: Record<string, unknown> = {}): string {
+  const id = nextId(state);
+  state.invoices.set(id, {
+    id,
+    tenant_id: TENANT_ID,
+    org_node_id: SEDE_A,
+    quote_id: null,
+    serie: 'F001',
+    numero: state.invoices.size + 1,
+    customer_doc_type: 'dni',
+    customer_doc_number: '99990001',
+    customer_name: 'PACIENTE DEMO UNO',
+    items: [{ description: 'Consulta ambulatoria', quantity: 1, unitPrice: 100 }],
+    subtotal: 100,
+    igv_rate: 0.18,
+    igv_total: 18,
+    total: 118,
+    status: 'issued',
+    fiscal_status: 'pending',
+    fiscal_adapter: 'manual_v1',
+    fiscal_payload: {},
+    cash_session_id: SESSION_ID,
+    issued_at: '2026-03-10T09:00:00.000Z',
+    created_at: '2026-03-10T09:00:00.000Z',
+    ...overrides,
+    id,
+  });
+  return id;
 }
 
 function seedSession(state: FakeState, orgNodeId = SEDE_A, id = SESSION_ID): string {
@@ -328,6 +359,26 @@ function createDb(state: FakeState): FakeDb {
       if (text.includes('FROM invoices WHERE tenant_id = $1 AND id = $2')) {
         const invoice = state.invoices.get(String(v[1]));
         return { rows: invoice === undefined ? [] : [invoice] };
+      }
+      if (text.includes('FROM invoices WHERE tenant_id = $1 AND org_node_id = ANY')) {
+        // List branch: the service appends the filters in the fixed order
+        // cash session, status, from, to, so the values line up positionally.
+        const scope = v[1] as string[];
+        let index = 2;
+        const cash = text.includes('cash_session_id = $') ? String(v[index++]) : null;
+        const status = text.includes(' AND status = $') ? String(v[index++]) : null;
+        const from = text.includes('COALESCE(issued_at, created_at) >= $') ? String(v[index++]) : null;
+        const to = text.includes('COALESCE(issued_at, created_at) <= $') ? String(v[index++]) : null;
+        const rows = [...state.invoices.values()]
+          .filter((invoice) => scope.includes(String(invoice.org_node_id)))
+          .filter((invoice) => cash === null || String(invoice.cash_session_id) === cash)
+          .filter((invoice) => status === null || String(invoice.status) === status)
+          .filter((invoice) => {
+            const emitted = String(invoice.issued_at ?? invoice.created_at);
+            return (from === null || emitted >= from) && (to === null || emitted <= to);
+          })
+          .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+        return { rows };
       }
 
       // ---- payments ----
@@ -844,6 +895,112 @@ describe('invoice read with fiscal status', () => {
       BILLING_ERROR.invoiceNotFound,
       404,
     );
+  });
+});
+
+// ============ invoice list ============
+
+describe('invoice list', () => {
+  it('lists the invoices inside the caller scope, newest first', async () => {
+    const db = createDb(newState());
+    const first = seedInvoice(db.state, { created_at: '2026-03-10T09:00:00.000Z' });
+    const second = seedInvoice(db.state, { created_at: '2026-03-11T09:00:00.000Z' });
+    seedInvoice(db.state, { org_node_id: SEDE_B });
+    const rows = await listInvoices(actor(db), {});
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      [second, first],
+    );
+    assert.equal(rows[0]?.status, 'issued');
+  });
+
+  it('treats empty-string filters as absent', async () => {
+    const db = createDb(newState());
+    seedInvoice(db.state);
+    const rows = await listInvoices(actor(db), { cashSession: '', status: '', from: '', to: '' });
+    assert.equal(rows.length, 1);
+  });
+
+  it('filters by cash session', async () => {
+    const db = createDb(newState());
+    const wanted = seedInvoice(db.state, { cash_session_id: SESSION_ID });
+    seedInvoice(db.state, { cash_session_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff' });
+    const rows = await listInvoices(actor(db), { cashSession: SESSION_ID });
+    assert.deepEqual(rows.map((row) => row.id), [wanted]);
+  });
+
+  it('filters by commercial status', async () => {
+    const db = createDb(newState());
+    const wanted = seedInvoice(db.state, { status: 'paid' });
+    seedInvoice(db.state, { status: 'voided' });
+    const rows = await listInvoices(actor(db), { status: 'paid' });
+    assert.deepEqual(rows.map((row) => row.id), [wanted]);
+  });
+
+  it('filters by emission window', async () => {
+    const db = createDb(newState());
+    seedInvoice(db.state, { issued_at: '2026-01-05T09:00:00.000Z', created_at: '2026-01-05T09:00:00.000Z' });
+    const wanted = seedInvoice(db.state, {
+      issued_at: '2026-03-10T09:00:00.000Z',
+      created_at: '2026-03-10T09:00:00.000Z',
+    });
+    seedInvoice(db.state, { issued_at: '2026-06-20T09:00:00.000Z', created_at: '2026-06-20T09:00:00.000Z' });
+    const rows = await listInvoices(actor(db), { from: '2026-03-01', to: '2026-03-31' });
+    assert.deepEqual(rows.map((row) => row.id), [wanted]);
+  });
+
+  it('caps the answer at 200 rows like the other list endpoints', async () => {
+    const db = createDb(newState());
+    seedInvoice(db.state);
+    await listInvoices(actor(db), {});
+    assert.equal(
+      db.queries.some((query) => query.text.includes('LIMIT 200')),
+      true,
+      'the issued SQL carries the cap',
+    );
+  });
+
+  it('rejects a malformed cashSession, status and date with 400', async () => {
+    const db = createDb(newState());
+    await expectError(
+      () => listInvoices(actor(db), { cashSession: 'no-es-uuid' }),
+      BILLING_ERROR.invalidParam,
+      400,
+    );
+    await expectError(
+      () => listInvoices(actor(db), { status: 'facturado' }),
+      BILLING_ERROR.invalidParam,
+      400,
+    );
+    await expectError(
+      () => listInvoices(actor(db), { from: 'no-es-fecha' }),
+      BILLING_ERROR.invalidParam,
+      400,
+    );
+    await expectError(
+      () => listInvoices(actor(db), { to: '32-13-99' }),
+      BILLING_ERROR.invalidParam,
+      400,
+    );
+  });
+
+  it('denies a role without invoice.issue and audits the denial', async () => {
+    const db = createDb(newState({ role: 'medico' }));
+    seedInvoice(db.state);
+    const body = await expectError(
+      () => listInvoices(actor(db, { userId: USER_MEDICO }), {}),
+      'access.denied',
+      403,
+    );
+    assert.equal(body.reason, 'role.denied');
+    assert.equal(auditsOf(db.state, 'access.denied').length, 1);
+  });
+
+  it('writes no audit row on a successful read', async () => {
+    const db = createDb(newState());
+    seedInvoice(db.state);
+    await listInvoices(actor(db), {});
+    assert.equal(db.state.audits.length, 0);
   });
 });
 
