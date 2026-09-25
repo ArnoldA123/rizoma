@@ -62,6 +62,11 @@
 // (`enqueueInvoiceWebhooks`, called inside the emitter transaction). Delivery
 // itself belongs to the workers (`webhook-deliver.ts`), so the API never
 // moves a delivery row.
+// A16 (N1) mounts the notify endpoints: `notify/notify.controller.ts` is thin
+// and decorator-only — the plain `notify/notify.service.ts` owns validation,
+// the tenant-admin gate, the `to` → `recipient` mapping, the same-tx
+// `enqueueNotify` writer over `message_log`, the worker-owned `mark*`
+// transitions and the active-template reads with `{{var}}` render.
 //
 // Only the JWT verifier needs a provider: the guard is a pure function over
 // facts the endpoint owns (identity, membership, entity, module), so there is
@@ -97,6 +102,7 @@ import { CONFIG_TOKEN, load, type ApiConfig } from './config/configuration.ts';
 import { HealthController, REDIS_CLIENT, createRedisClient } from './health/health.controller.ts';
 import { BillingController } from './billing/billing.controller.ts';
 import { FilesController } from './files/files.controller.ts';
+import { NotifyController } from './notify/notify.controller.ts';
 import { OnboardingController } from './onboarding/onboarding.controller.ts';
 import { AppointmentsController } from './salud/appointments.controller.ts';
 import { ConsentsController } from './salud/consents.controller.ts';
@@ -136,6 +142,7 @@ import {
     PrescriptionsController,
     BillingController,
     FilesController,
+    NotifyController,
     ApiKeysController,
     WebhooksController,
     ImportsController,
