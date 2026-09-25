@@ -1,0 +1,146 @@
+/* ============================================================================
+   Rizoma web — Salud section motion
+   ----------------------------------------------------------------------------
+   Loaded by the three W2 pages (`app/salud/pacientes`,
+   `app/salud/pacientes/[id]`, `app/salud/agenda`), next to the global tokens.
+   It lives in the section and not in `globals.css` so the base shell keeps a
+   zero-animation surface and the Salud vertical owns its own restraint.
+
+   Rules this file obeys, deliberately and checkably:
+   - every animation moves `transform` or `opacity` only: no width, height,
+     filter, box-shadow or colour keyframe ever animates a layout or a repaint
+     of a large area;
+   - `prefers-reduced-motion: reduce` replaces motion with the static or
+     fade-only state (the global rule already collapses durations, this block
+     removes the sweep entirely so a skeleton is a plain block);
+   - the decorative sweep is a shimmer *over a real block* mimicking the final
+     shape: there is no spinner anywhere in this vertical.
+
+   Classes, and who uses them:
+   - `.sd-shimmer`  → `components/ui/skeleton.tsx` (directional sweep)
+   - `.sd-rise`     → `components/ui/field-feedback.tsx`, `components/salud/*`
+   - `.sd-revert`   → optimistic sign/close rollback rows
+   - `.sd-magnetic` → `components/ui/magnetic.tsx` (transform-only hover pull)
+   ========================================================================== */
+
+/* The sweep: an absolutely positioned gradient stripe travelling left to right
+   across the block it decorates. `transform` only, so the browser can keep it
+   on the compositor and never invalidates the row's layout. */
+@keyframes sd-shimmer-sweep {
+  from {
+    transform: translate3d(-110%, 0, 0);
+  }
+  to {
+    transform: translate3d(210%, 0, 0);
+  }
+}
+
+@keyframes sd-rise-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes sd-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Rollback of an optimistic change: a short lateral shake plus a fade, so the
+   revert is *seen* and the row ends exactly where it started. */
+@keyframes sd-revert-flash {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  20% {
+    opacity: 0.45;
+    transform: translate3d(-3px, 0, 0);
+  }
+  50% {
+    opacity: 0.9;
+    transform: translate3d(3px, 0, 0);
+  }
+  80% {
+    opacity: 1;
+    transform: translate3d(-1px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.sd-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.sd-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* A sheen built from the muted token, so it reads in both themes: a slightly
+     darker sweep on the light paper, a slightly lighter one on the dark card. */
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--base-muted) 14%, transparent) 45%,
+    color-mix(in srgb, var(--base-muted) 22%, transparent) 55%,
+    transparent 100%
+  );
+  transform: translate3d(-110%, 0, 0);
+  animation: sd-shimmer-sweep 1.4s ease-in-out infinite;
+  animation-delay: var(--sd-shimmer-delay, 0ms);
+  pointer-events: none;
+}
+
+.sd-rise {
+  animation: sd-rise-in 220ms ease-out both;
+}
+
+.sd-fade {
+  animation: sd-fade-in 260ms ease-out both;
+}
+
+.sd-revert {
+  animation: sd-revert-flash 420ms ease-out both;
+}
+
+/* The magnetic pull of the primary CTA: a compositor-only translate, with the
+   return trip eased so letting go settles instead of snapping. */
+.sd-magnetic {
+  display: inline-flex;
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sd-shimmer::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  .sd-rise,
+  .sd-fade {
+    animation: sd-fade-in 1ms linear both;
+  }
+
+  .sd-revert {
+    animation: sd-fade-in 1ms linear both;
+  }
+
+  .sd-magnetic {
+    transition: none;
+    transform: none !important;
+  }
+}

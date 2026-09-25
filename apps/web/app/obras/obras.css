@@ -1,0 +1,122 @@
+/* ============================================================================
+   Rizoma web — Obras section motion
+   ----------------------------------------------------------------------------
+   Loaded by the three W4 pages (`app/obras`, `app/obras/[siteId]`,
+   `app/obras/tablero`). It mirrors the restraint of `app/salud/salud.css` under
+   its own `ob-` prefix instead of importing that file: the Salud section owns
+   its stylesheet, and a cross-section import would couple the two verticals
+   through a file neither of them owns. Extracting one shared `ui/motion.css`
+   is the documented path forward (see the W4 handoff notes).
+
+   Rules this file obeys, deliberately and checkably:
+   - every animation moves `transform` or `opacity` only: no width, height,
+     filter, box-shadow or colour keyframe ever animates layout or repaints a
+     large area;
+   - `prefers-reduced-motion: reduce` removes the sweep entirely and collapses
+     the entrances to a 1 ms fade, so a skeleton is a plain block;
+   - the sweep is a shimmer over a real block shaped like the row that is
+     coming, so there is no spinner in this vertical either.
+
+   Classes:
+   - `.ob-shimmer` → shaped skeletons of `components/obras/*`
+   - `.ob-rise`    → write confirmations and freshly listed rows
+   - `.ob-revert`  → optimistic rollback rows
+   ========================================================================== */
+
+@keyframes ob-shimmer-sweep {
+  from {
+    transform: translate3d(-110%, 0, 0);
+  }
+  to {
+    transform: translate3d(210%, 0, 0);
+  }
+}
+
+@keyframes ob-rise-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes ob-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Rollback of an optimistic change: a short lateral shake plus a fade, so the
+   revert is seen and the row ends exactly where it started. */
+@keyframes ob-revert-flash {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  20% {
+    opacity: 0.45;
+    transform: translate3d(-3px, 0, 0);
+  }
+  50% {
+    opacity: 0.9;
+    transform: translate3d(3px, 0, 0);
+  }
+  80% {
+    opacity: 1;
+    transform: translate3d(-1px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.ob-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.ob-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* A sheen built from the muted token, so it reads in both themes: a slightly
+     darker sweep on the light paper, a slightly lighter one on the dark card. */
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--base-muted) 14%, transparent) 45%,
+    color-mix(in srgb, var(--base-muted) 22%, transparent) 55%,
+    transparent 100%
+  );
+  transform: translate3d(-110%, 0, 0);
+  animation: ob-shimmer-sweep 1.4s ease-in-out infinite;
+  animation-delay: var(--ob-shimmer-delay, 0ms);
+  pointer-events: none;
+}
+
+.ob-rise {
+  animation: ob-rise-in 220ms ease-out both;
+}
+
+.ob-revert {
+  animation: ob-revert-flash 420ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-shimmer::after {
+    animation: none;
+    opacity: 0;
+  }
+
+  .ob-rise,
+  .ob-revert {
+    animation: ob-fade-in 1ms linear both;
+  }
+}
