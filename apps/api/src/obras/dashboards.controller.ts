@@ -2,9 +2,11 @@
 // (bases-consolidadas-v1.md §2.4, §3.4, §6.2). No domain logic and no
 // permission checks live here: the service owns the guard, the scope and the
 // KPI queries, so the handler only forwards the request facts.
-import { Controller, Get, Param, Query, Req, Res } from '@nestjs/common';
+import { Controller, Get, Inject, Param, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import type { TenantScopedRequest } from '../tenant/tenant.middleware.ts';
+import type { BoardCacheClient } from '../cache/boards.ts';
+import { REDIS_CLIENT } from '../health/health.controller.ts';
 import { actorFromRequest } from './obras.service.ts';
 import {
   exportCompanyBoard,
@@ -22,6 +24,7 @@ import {
 
 @Controller('obras')
 export class ObrasDashboardsController {
+  constructor(@Inject(REDIS_CLIENT) private readonly cache: BoardCacheClient) {}
   /**
    * `GET /v1/obras/sites/:siteId/board/export?date=&format=csv` — BI export of
    * the site board. Same aggregates and same `LIMIT` as the JSON board,
@@ -54,9 +57,9 @@ export class ObrasDashboardsController {
     @Query('compare') compare?: string,
   ): Promise<SiteBoard | ComparedSiteBoard> {
     if (compare !== undefined && compare.trim() !== '') {
-      return getComparedSiteBoard(actorFromRequest(req), siteId, date, compare);
+      return getComparedSiteBoard(actorFromRequest(req), siteId, date, compare, this.cache);
     }
-    return getSiteBoard(actorFromRequest(req), siteId, date);
+    return getSiteBoard(actorFromRequest(req), siteId, date, this.cache);
   }
 
   /**
@@ -88,8 +91,8 @@ export class ObrasDashboardsController {
     @Query('compare') compare?: string,
   ): Promise<CompanyBoard | ComparedCompanyBoard> {
     if (compare !== undefined && compare.trim() !== '') {
-      return getComparedCompanyBoard(actorFromRequest(req), date, compare);
+      return getComparedCompanyBoard(actorFromRequest(req), date, compare, this.cache);
     }
-    return getCompanyBoard(actorFromRequest(req), date);
+    return getCompanyBoard(actorFromRequest(req), date, this.cache);
   }
 }

@@ -2,9 +2,11 @@
 // (bases-consolidadas-v1.md §6.3). No domain logic and no permission checks
 // live here: the service owns the board-role validation, the guard and the KPI
 // queries, so the handler only forwards the request facts.
-import { Controller, Get, Param, Query, Req, Res } from '@nestjs/common';
+import { Controller, Get, Inject, Param, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import type { TenantScopedRequest } from '../tenant/tenant.middleware.ts';
+import type { BoardCacheClient } from '../cache/boards.ts';
+import { REDIS_CLIENT } from '../health/health.controller.ts';
 import { actorFromRequest } from './salud.service.ts';
 import {
   exportBoard,
@@ -17,6 +19,7 @@ import {
 
 @Controller('salud/dashboards')
 export class DashboardsController {
+  constructor(@Inject(REDIS_CLIENT) private readonly cache: BoardCacheClient) {}
   /**
    * `GET /v1/salud/dashboards/:role/export?org=&date=&format=csv` — BI export
    * of the board aggregate. Same numbers as the JSON board, one CSV row. The
@@ -52,8 +55,8 @@ export class DashboardsController {
     @Query('compare') compare?: string,
   ): Promise<DashboardBoard | ComparedDashboardBoard> {
     if (compare !== undefined && compare.trim() !== '') {
-      return getComparedBoard(actorFromRequest(req), role, org, date, compare);
+      return getComparedBoard(actorFromRequest(req), role, org, date, compare, this.cache);
     }
-    return getBoard(actorFromRequest(req), role, org, date);
+    return getBoard(actorFromRequest(req), role, org, date, this.cache);
   }
 }
