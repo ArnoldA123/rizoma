@@ -1,5 +1,6 @@
 # Local Pi runtime state
 .atl/
+.playwright-cli/
 
 # Node
 node_modules/
