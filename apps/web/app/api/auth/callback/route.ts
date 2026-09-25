@@ -69,8 +69,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     SESSION_COOKIE,
     encodeSession({
       accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-      idToken: tokens.idToken,
       expiresAt: Date.now() + tokens.expiresIn * 1000,
       tokenType: tokens.tokenType,
     }),
