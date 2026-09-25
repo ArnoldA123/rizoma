@@ -51,6 +51,20 @@ const BOARD_ACTIONS: Record<DashboardRole, ActionCode> = {
 /** Rows a row-returning board query may yield; the aggregates already collapse. */
 export const DASHBOARD_LIST_LIMIT = 200;
 
+/** Days a `previous-week` comparison looks back: the board day vs −7d. */
+export const BOARD_COMPARE_DAYS = 7;
+
+/** `?compare=` modes. The previous-week snapshot is the only one in MVP1. */
+export const BOARD_COMPARE_MODES = ['previous-week'] as const;
+export type BoardCompareMode = (typeof BOARD_COMPARE_MODES)[number];
+
+/** `.../export?format=` values. CSV is the only BI export in MVP1. */
+export const BOARD_EXPORT_FORMATS = ['csv'] as const;
+export type BoardExportFormat = (typeof BOARD_EXPORT_FORMATS)[number];
+
+/** Content type of every board export. */
+export const BOARD_EXPORT_CONTENT_TYPE = 'text/csv; charset=utf-8';
+
 // ============ error envelope ============
 
 /** Domain envelope: `{code: 'dashboard.*', message, traceId}`. */
@@ -101,6 +115,18 @@ function toIso(value: unknown): string | null {
 /** One decimal is enough for an average wait in minutes. */
 function round1(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+/** Two decimals keep cents in a collected-amount delta; counts stay exact. */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/** Moves a `YYYY-MM-DD` day by whole days, staying in UTC. */
+function shiftIsoDate(date: string, days: number): string {
+  const base = new Date(`${date}T00:00:00.000Z`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
 }
 
 /** Strict calendar check: `YYYY-MM-DD` and a date the calendar actually has. */
@@ -362,27 +388,69 @@ function parseOrgNode(raw: string | undefined, fallback: string, traceId: string
   return value;
 }
 
+function parseCompare(raw: string | undefined, traceId: string): BoardCompareMode {
+  const value = raw?.trim() ?? '';
+  if (value === '') return 'previous-week';
+  if (!(BOARD_COMPARE_MODES as readonly string[]).includes(value)) {
+    throw dashboardError(
+      'dashboard.invalid_compare',
+      `Unknown compare mode (expected ${BOARD_COMPARE_MODES.join('|')}): ${value}`,
+      400,
+      traceId,
+    );
+  }
+  return value as BoardCompareMode;
+}
+
+function parseExportFormat(raw: string | undefined, traceId: string): BoardExportFormat {
+  const value = raw?.trim() ?? '';
+  if (!(BOARD_EXPORT_FORMATS as readonly string[]).includes(value)) {
+    throw dashboardError(
+      'dashboard.invalid_format',
+      `Unknown export format (expected ${BOARD_EXPORT_FORMATS.join('|')}): ${value === '' ? '(missing)' : value}`,
+      400,
+      traceId,
+    );
+  }
+  return value as BoardExportFormat;
+}
+
+/**
+ * Day-over-day comparison of one board: the board of `date` next to the
+ * board of `date − 7d`, plus the per-KPI drift (`current − previous`).
+ *
+ * Both legs run the same parametrized SQL; only the date changes. KPIs that
+ * are scope-state rather than day-state (caja `fiscalPending`/`openSession`,
+ * medico `openEpisodes`/`pendingConsents`) read identically in both legs, so
+ * their delta is 0 by construction — the day-filtered KPIs carry the signal.
+ */
+export interface ComparedDashboardBoard {
+  readonly current: DashboardBoard;
+  readonly previous: DashboardBoard;
+  readonly delta: Record<string, number>;
+}
+
+/** One BI export: a CSV of the board aggregate with its safe filename. */
+export interface BoardExport {
+  readonly filename: string;
+  readonly contentType: string;
+  readonly csv: string;
+}
+
 // ============ use case ============
 
 /**
- * Returns the board of `role` for one sede and day. The caller must be that
- * role; any other board is a 403 (`role.denied`) audited by the guard.
+ * Reads one board for one role, sede and day. The caller must already be
+ * authorized for the board; this is the shared leg of `getBoard`,
+ * `getComparedBoard` and `exportBoard`.
  */
-export async function getBoard(
+async function readBoard(
   actor: ActorContext,
-  role: string,
-  orgNodeId?: string,
-  date?: string,
+  boardRole: DashboardRole,
+  targetOrg: string,
+  scope: readonly string[],
+  boardDate: string,
 ): Promise<DashboardBoard> {
-  const boardRole = parseRole(role, actor.traceId);
-  const facts = await loadFacts(actor);
-  const fallbackOrg = facts.membership?.orgNodeId ?? actor.tenantId;
-  const targetOrg = parseOrgNode(orgNodeId, fallbackOrg, actor.traceId);
-  const boardDate = parseDate(date, actor.traceId);
-
-  await authorizeBoard(actor, facts, boardRole, targetOrg);
-  const scope = await loadScopeSubtree(actor.client, actor.tenantId, targetOrg);
-
   if (boardRole === 'recepcion') {
     const result = await actor.client.query(RECEPCION_BOARD_SQL, [actor.tenantId, scope, boardDate]);
     const row = readRows(result)[0] ?? {};
@@ -436,5 +504,157 @@ export async function getBoard(
     myAppointments: toNumber(readRows(appointments)[0]?.my_appointments),
     openEpisodes: toNumber(readRows(episodes)[0]?.open_episodes),
     pendingConsents: toNumber(readRows(consents)[0]?.pending_consents),
+  };
+}
+
+/** Per-KPI drift (`current − previous`) of two same-role boards. */
+function diffDashboardBoards(current: DashboardBoard, previous: DashboardBoard): Record<string, number> {
+  if (current.role !== previous.role) return {};
+  if (current.role === 'recepcion' && previous.role === 'recepcion') {
+    return {
+      todayAppointments: round2(current.todayAppointments - previous.todayAppointments),
+      waitingAvgMin: round2(current.waitingAvgMin - previous.waitingAvgMin),
+      noShows: round2(current.noShows - previous.noShows),
+      queue: round2(current.queue - previous.queue),
+    };
+  }
+  if (current.role === 'caja' && previous.role === 'caja') {
+    return {
+      todayCollected: round2(current.todayCollected - previous.todayCollected),
+      invoicesIssued: round2(current.invoicesIssued - previous.invoicesIssued),
+      fiscalPending: round2(current.fiscalPending - previous.fiscalPending),
+    };
+  }
+  if (current.role === 'medico' && previous.role === 'medico') {
+    return {
+      myAppointments: round2(current.myAppointments - previous.myAppointments),
+      openEpisodes: round2(current.openEpisodes - previous.openEpisodes),
+      pendingConsents: round2(current.pendingConsents - previous.pendingConsents),
+    };
+  }
+  return {};
+}
+
+/**
+ * Filename of a board export. The role comes from the allowlist and the date
+ * from the calendar check, so the name can only carry safe characters; the
+ * guard below mirrors the strictness of the imports errors-CSV naming (never
+ * a separator, a control character or a leading dot) as defense in depth.
+ */
+function safeExportFilename(role: DashboardRole, date: string): string {
+  const candidate = `tablero-${role}-${date}.csv`;
+  if (/[\\/:*?"<>|\u0000-\u001f]/.test(candidate) || candidate.startsWith('.')) {
+    return 'tablero.csv';
+  }
+  return candidate;
+}
+
+/** One CSV field: text, a number, or an empty cell. */
+type CsvCell = string | number | null;
+
+/** One CSV data row. */
+type CsvRow = readonly CsvCell[];
+
+/** One CSV cell: quoted only when it carries a comma, quote or line break. */
+function csvCell(value: string | number): string {
+  const text = typeof value === 'number' ? String(value) : value;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** Header plus rows, one trailing newline, no BOM: the BI-friendly shape. */
+function csvTable(header: readonly string[], rows: readonly CsvRow[]): string {
+  const lines = [
+    header.join(','),
+    ...rows.map((row) => row.map((cell) => (cell === null ? '' : csvCell(cell))).join(',')),
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+/** The board aggregate as one CSV row (wide format, same numbers as the JSON). */
+function boardToCsv(board: DashboardBoard): string {
+  if (board.role === 'recepcion') {
+    return csvTable(
+      ['role', 'org_node_id', 'date', 'today_appointments', 'waiting_avg_min', 'no_shows', 'queue'],
+      [[board.role, board.orgNodeId, board.date, board.todayAppointments, board.waitingAvgMin, board.noShows, board.queue]],
+    );
+  }
+  if (board.role === 'caja') {
+    return csvTable(
+      ['role', 'org_node_id', 'date', 'today_collected', 'invoices_issued', 'fiscal_pending', 'open_session_id', 'open_session_org_node_id', 'open_session_opened_at'],
+      [[board.role, board.orgNodeId, board.date, board.todayCollected, board.invoicesIssued, board.fiscalPending, board.openSession?.id ?? null, board.openSession?.orgNodeId ?? null, board.openSession?.openedAt ?? null]],
+    );
+  }
+  return csvTable(
+    ['role', 'org_node_id', 'date', 'my_appointments', 'open_episodes', 'pending_consents'],
+    [[board.role, board.orgNodeId, board.date, board.myAppointments, board.openEpisodes, board.pendingConsents]],
+  );
+}
+
+/**
+ * Returns the board of `role` for one sede and day. The caller must be that
+ * role; any other board is a 403 (`role.denied`) audited by the guard.
+ */
+export async function getBoard(
+  actor: ActorContext,
+  role: string,
+  orgNodeId?: string,
+  date?: string,
+): Promise<DashboardBoard> {
+  const boardRole = parseRole(role, actor.traceId);
+  const facts = await loadFacts(actor);
+  const fallbackOrg = facts.membership?.orgNodeId ?? actor.tenantId;
+  const targetOrg = parseOrgNode(orgNodeId, fallbackOrg, actor.traceId);
+  const boardDate = parseDate(date, actor.traceId);
+
+  await authorizeBoard(actor, facts, boardRole, targetOrg);
+  const scope = await loadScopeSubtree(actor.client, actor.tenantId, targetOrg);
+  return readBoard(actor, boardRole, targetOrg, scope, boardDate);
+}
+
+/**
+ * Returns `{current, previous, delta}` for one board: the board of `date`
+ * next to the board of `date − 7d`, with the same parametrized SQL on both
+ * legs. Authorization and scope resolve once, so the comparison cannot widen
+ * what `getBoard` allows.
+ */
+export async function getComparedBoard(
+  actor: ActorContext,
+  role: string,
+  orgNodeId?: string,
+  date?: string,
+  compare?: string,
+): Promise<ComparedDashboardBoard> {
+  parseCompare(compare, actor.traceId);
+  const boardRole = parseRole(role, actor.traceId);
+  const facts = await loadFacts(actor);
+  const fallbackOrg = facts.membership?.orgNodeId ?? actor.tenantId;
+  const targetOrg = parseOrgNode(orgNodeId, fallbackOrg, actor.traceId);
+  const boardDate = parseDate(date, actor.traceId);
+
+  await authorizeBoard(actor, facts, boardRole, targetOrg);
+  const scope = await loadScopeSubtree(actor.client, actor.tenantId, targetOrg);
+  const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
+  const current = await readBoard(actor, boardRole, targetOrg, scope, boardDate);
+  const previous = await readBoard(actor, boardRole, targetOrg, scope, previousDate);
+  return { current, previous, delta: diffDashboardBoards(current, previous) };
+}
+
+/**
+ * Exports one board aggregate as CSV (`GET .../export?format=csv`). Same
+ * aggregate and same bound as the JSON board, one row, wide format.
+ */
+export async function exportBoard(
+  actor: ActorContext,
+  role: string,
+  orgNodeId?: string,
+  date?: string,
+  format?: string,
+): Promise<BoardExport> {
+  parseExportFormat(format, actor.traceId);
+  const board = await getBoard(actor, role, orgNodeId, date);
+  return {
+    filename: safeExportFilename(board.role, board.date),
+    contentType: BOARD_EXPORT_CONTENT_TYPE,
+    csv: boardToCsv(board),
   };
 }

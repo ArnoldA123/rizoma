@@ -14,6 +14,12 @@
 import { HttpException } from '@nestjs/common';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
+import {
+  CUSTOM_FIELD_ENTITY_TRIAGE,
+  CUSTOM_FIELD_MODULE_SALUD,
+  loadActiveDefs,
+  validateCustomValues,
+} from '../custom-fields/custom-fields.service.ts';
 import type { ActorContext, SaludClient } from './salud.service.ts';
 
 /** Tenant module this vertical requires (bases §3.1 property 6 / §3.5). */
@@ -370,6 +376,14 @@ export async function createTriage(actor: ActorContext, body: unknown): Promise<
     stateAllows: patient.active,
     attemptedAction: 'triage.create',
   });
+
+  // B2: `active` definitions of (salud, triage) type `values` — a missing
+  // `required` code or a mistyped value refuses the write before the insert.
+  validateCustomValues(
+    await loadActiveDefs(actor.client, actor.tenantId, CUSTOM_FIELD_MODULE_SALUD, CUSTOM_FIELD_ENTITY_TRIAGE),
+    input.values,
+    actor.traceId,
+  );
 
   const result = await actor.client.query(INSERT_TRIAGE_SQL, [
     actor.tenantId,

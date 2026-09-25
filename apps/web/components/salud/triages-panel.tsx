@@ -1,8 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { z } from 'zod';
 import type { EpisodeRecord, FieldCheck, TriageRecord } from '@rizoma/contracts';
-import { checkNumberField, checkOptionalText, checkOptionalUuidField, firstIssue } from '@rizoma/contracts';
+import { checkDateField, checkNumberField, checkOptionalText, checkOptionalUuidField, checkRequiredText, firstIssue } from '@rizoma/contracts';
+import { requestJson } from '@/lib/api-client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
@@ -32,6 +34,61 @@ export interface TriagesPanelProps {
   /** `patient.write` — recording a triage requires it. */
   readonly canWrite: boolean;
   readonly className?: string;
+}
+
+/**
+ * Typed custom key of `triages.values` (B2). Local schema until
+ * `packages/contracts/src/index.ts` re-exports `./custom-fields.ts` — it
+ * mirrors `customFieldDefSchema` field by field, so the form below renders
+ * exactly the `active` definitions the API would enforce on arrival.
+ */
+const customFieldDefSchema = z.object({
+  id: z.string(),
+  module: z.string(),
+  entity: z.string(),
+  code: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
+  type: z.enum(['text', 'number', 'date', 'boolean']),
+  required: z.boolean(),
+  status: z.string(),
+});
+type CustomFieldDef = z.infer<typeof customFieldDefSchema>;
+
+/** Free-text custom value cap; the API stores the bag as JSONB, not a column. */
+const CUSTOM_TEXT_MAX = 500;
+
+/** Live check of one custom value, mirroring `validateCustomValues` server-side. */
+function checkCustomField(def: CustomFieldDef, raw: string): FieldCheck {
+  const field = `custom.${def.code}`;
+  const value = (raw ?? '').trim();
+  if (value === '') return def.required ? { field, code: 'required' } : null;
+  switch (def.type) {
+    case 'number':
+      return Number.isFinite(Number(value)) ? null : { field, code: 'invalid_number' };
+    case 'date':
+      return checkDateField(field, value);
+    case 'boolean':
+      return null;
+    case 'text':
+      return def.required
+        ? checkRequiredText(field, value, CUSTOM_TEXT_MAX)
+        : checkOptionalText(field, value, CUSTOM_TEXT_MAX);
+  }
+}
+
+/** Parses the string-held custom values into the JSONB bag the API types. */
+function parseCustomValues(
+  defs: readonly CustomFieldDef[],
+  values: Readonly<Record<string, string>>,
+): Record<string, unknown> {
+  const bag: Record<string, unknown> = {};
+  for (const def of defs) {
+    const raw = (values[def.code] ?? '').trim();
+    if (raw === '') continue;
+    if (def.type === 'number') bag[def.code] = Number(raw);
+    else if (def.type === 'boolean') bag[def.code] = raw === 'true';
+    else bag[def.code] = raw;
+  }
+  return bag;
 }
 
 /** Vital-sign fields the form renders, in display order. */
@@ -194,6 +251,31 @@ function TriageForm({ patientId, episodes, onCreated }: TriageFormProps) {
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
+  // B2 custom keys of `values`: `active` definitions of (salud, triage).
+  // A failed read degrades to no section — the API still enforces on arrival.
+  const [customDefs, setCustomDefs] = useState<readonly CustomFieldDef[]>([]);
+  const [customValues, setCustomValues] = useState<Readonly<Record<string, string>>>({});
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    requestJson(
+      '/custom-fields?module=salud&entity=triage&status=active',
+      z.array(customFieldDefSchema),
+      { signal: controller.signal },
+    )
+      .then((rows) => {
+        if (!active) return;
+        setCustomDefs((rows ?? []).filter((def) => def.status === 'active'));
+      })
+      .catch(() => {
+        if (active) setCustomDefs([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     episodeId: checkOptionalUuidField('episodeId', episodeId),
@@ -204,6 +286,12 @@ function TriageForm({ patientId, episodes, onCreated }: TriageFormProps) {
       ]),
     ),
     note: checkOptionalText('note', note, 280),
+    ...Object.fromEntries(
+      customDefs.map((def) => [
+        `custom.${def.code}`,
+        checkCustomField(def, customValues[def.code] ?? ''),
+      ]),
+    ),
   };
   const hasVital = VITAL_FIELDS.some((field) => (vitals[field.key] ?? '').trim() !== '');
 
@@ -213,12 +301,13 @@ function TriageForm({ patientId, episodes, onCreated }: TriageFormProps) {
     setFailure(null);
     if (firstIssue(checks) !== null || !hasVital) return;
 
-    const values: Record<string, number | string> = {};
+    const values: Record<string, number | string | boolean> = {};
     for (const { key } of VITAL_FIELDS) {
       const raw = (vitals[key] ?? '').trim();
       if (raw !== '') values[key] = Number(raw);
     }
     if (note.trim() !== '') values.note = note.trim();
+    Object.assign(values, parseCustomValues(customDefs, customValues));
 
     setSaving(true);
     try {
@@ -230,6 +319,7 @@ function TriageForm({ patientId, episodes, onCreated }: TriageFormProps) {
       setEpisodeId('');
       setVitals({});
       setNote('');
+      setCustomValues({});
       setTouched(false);
       onCreated(created);
     } catch (error) {
@@ -296,6 +386,61 @@ function TriageForm({ patientId, episodes, onCreated }: TriageFormProps) {
           <FieldMessage issue={checks.note ?? null} touched={touched} validLabel="Dato aceptado." />
         </div>
       </div>
+
+      {customDefs.length === 0 ? null : (
+        <div className="flex flex-col gap-4 rounded-md border border-border p-4">
+          <p className="text-xs text-muted-foreground">
+            Campos personalizados del tenant. Viajan dentro de{' '}
+            <code className="font-mono">values</code> y el API los valida por tipo.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            {customDefs.map((def) => {
+              const field = `custom.${def.code}`;
+              const raw = customValues[def.code] ?? '';
+              return (
+                <div key={def.code} className="flex flex-col gap-1.5">
+                  <label htmlFor={`triage-custom-${def.code}`} className="text-[0.8125rem] font-medium">
+                    {def.code}
+                    {def.required ? ' *' : ''}
+                  </label>
+                  {def.type === 'boolean' ? (
+                    <input
+                      id={`triage-custom-${def.code}`}
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={raw === 'true'}
+                      onChange={(event) =>
+                        setCustomValues((current) => ({
+                          ...current,
+                          [def.code]: event.target.checked ? 'true' : 'false',
+                        }))
+                      }
+                      onBlur={() => setTouched(true)}
+                    />
+                  ) : (
+                    <Input
+                      id={`triage-custom-${def.code}`}
+                      autoComplete="off"
+                      inputMode={def.type === 'number' ? 'decimal' : undefined}
+                      placeholder={def.type === 'date' ? 'AAAA-MM-DD' : undefined}
+                      value={raw}
+                      onChange={(event) =>
+                        setCustomValues((current) => ({
+                          ...current,
+                          [def.code]: event.target.value,
+                        }))
+                      }
+                      onBlur={() => setTouched(true)}
+                      {...fieldStateProps(checks[field] ?? null, touched)}
+                    />
+                  )}
+                  <FieldMessage issue={checks[field] ?? null} touched={touched} validLabel="Dato aceptado." />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-3">
         {VITAL_FIELDS.map(({ key, label }) => (

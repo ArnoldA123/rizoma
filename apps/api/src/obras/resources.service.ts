@@ -38,6 +38,7 @@ import { HttpException } from '@nestjs/common';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { enqueueWebhooks } from '../webhooks/webhooks.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
+import { assertTransition } from '../state-transitions/state-transitions.service.ts';
 import {
   OBRA_LIST_LIMIT,
   OBRA_MODULE,
@@ -1606,7 +1607,19 @@ export async function publishSiteLog(
   const log = await findSiteLog(actor, logId);
   if (log === null) throw notFound('site log', actor.traceId);
   if (log.siteId !== site.id) throw notFound('site log', actor.traceId);
-  if (log.status !== 'draft') throw stateDenied(`site_log.${log.status}`, actor.traceId);
+  // B3: the closed catalog is consulted alongside the legacy state check;
+  // either term allows, so behavior is unchanged while the seed agrees with
+  // the legacy check (draft → published granted to the on-site roles).
+  const transitionAllows = await assertTransition(actor.client, {
+    entity: 'site_log',
+    from: log.status,
+    to: 'published',
+    role: membership.role,
+    tenantId: actor.tenantId,
+  });
+  if (log.status !== 'draft' && !transitionAllows) {
+    throw stateDenied(`site_log.${log.status}`, actor.traceId);
+  }
   const result = await actor.client.query(PUBLISH_SITE_LOG_SQL, [actor.tenantId, log.id]);
   const row = readRows(result)[0];
   if (row === undefined) throw stateDenied('site_log.not_draft', actor.traceId);

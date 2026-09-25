@@ -1,7 +1,7 @@
 // Appointments endpoint — thin HTTP skin over `salud.service.ts`
 // (bases-consolidadas-v1.md §2.3, §3.3). Guard, scope, state and audit stay in
 // the service.
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import type { TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 import {
   actorFromRequest,
@@ -15,8 +15,11 @@ import {
 export class AppointmentsController {
   /** `GET /v1/salud/appointments` — agenda inside the caller scope. */
   @Get()
-  list(@Req() req: TenantScopedRequest): Promise<AppointmentRecord[]> {
-    return listAppointments(actorFromRequest(req));
+  list(
+    @Req() req: TenantScopedRequest,
+    @Query('saved_view_id') savedViewId?: string,
+  ): Promise<AppointmentRecord[]> {
+    return listAppointments(actorFromRequest(req), savedViewId ?? null);
   }
 
   /** `POST /v1/salud/appointments` — schedule an appointment. */

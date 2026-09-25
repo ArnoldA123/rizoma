@@ -89,8 +89,15 @@ export class BillingController {
     @Query('status') status?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('saved_view_id') savedViewId?: string,
   ): Promise<InvoiceRecord[]> {
-    return listInvoices(actorFromRequest(req), { cashSession, status, from, to });
+    return listInvoices(actorFromRequest(req), {
+      cashSession,
+      status,
+      from,
+      to,
+      saved_view_id: savedViewId,
+    });
   }
 
   /** `GET /v1/billing/invoices/:id` — invoice + fiscal status/payload. */

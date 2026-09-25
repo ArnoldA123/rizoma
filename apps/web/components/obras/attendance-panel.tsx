@@ -2,16 +2,20 @@
 
 import { useState } from 'react';
 import type { AttendanceRecord } from '@rizoma/contracts';
+import { attendanceListSchema, attendanceQueryString } from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
+import { ViewSelector } from '@/components/views/view-selector';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
+import { requestJson } from '@/lib/api-client';
+import { withSavedView } from '@/lib/views-api';
 import { formatUtcStamp } from '@/lib/format';
 import { attendanceStatusLabel, attendanceStatusVariant } from '@/lib/labels';
-import { approveAttendance, listAttendance, markAttendance } from '@/lib/obras-api';
+import { approveAttendance, markAttendance } from '@/lib/obras-api';
 import { currentUtcDate, formatUtcDateLong, isCurrentUtcDate, shiftUtcDate } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 
@@ -61,13 +65,17 @@ export function AttendancePanel({
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // The active saved view narrows the server list via `?saved_view_id=`; null
+  // reads the unfiltered day. The id joins the resource key so a pick
+  // refetches through the same abort-safe path as a day change.
+  const [viewId, setViewId] = useState<string | null>(null);
 
   // The panel owns its read and is mounted only once the ficha confirmed the
   // caller can operate in the obra, so a role without the assignment key never
   // fires a request the API would refuse.
   const attendance = useResource<AttendanceRecord[]>(
-    `obras-attendance:${siteId}:${date}`,
-    (signal) => listAttendance({ site: siteId, date }, signal),
+    `obras-attendance:${siteId}:${date}:${viewId ?? ''}`,
+    (signal) => readAttendance(siteId, date, viewId, signal),
   );
 
   const rows = attendance.data ?? [];
@@ -120,6 +128,7 @@ export function AttendancePanel({
       </CardHeader>
 
       <CardContent className="flex flex-col gap-4">
+        <ViewSelector entity="attendance" selectedId={viewId} onSelect={setViewId} />
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => onDateChange(shiftUtcDate(date, -1))}>
             Día anterior
@@ -229,6 +238,36 @@ export function AttendancePanel({
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * Reads the day list through the proxy, narrowed by the active saved view.
+ * `site` and `date` stay required: the API still rejects a missing day, and
+ * the view only ANDs its exact-equality bag onto that scope.
+ */
+async function readAttendance(
+  siteId: string,
+  date: string,
+  savedViewId: string | null,
+  signal: AbortSignal,
+): Promise<AttendanceRecord[]> {
+  const rows = await requestJson(
+    attendancePath(siteId, date, savedViewId),
+    attendanceListSchema,
+    { signal },
+  );
+  return rows ?? [];
+}
+
+/**
+ * Path of `GET /v1/obras/attendance` carrying `site`+`date` and the optional
+ * `?saved_view_id=` suffix named once by `withSavedView`.
+ */
+function attendancePath(siteId: string, date: string, savedViewId: string | null): string {
+  const base = withSavedView('/obras/attendance', savedViewId);
+  const rest = attendanceQueryString({ site: siteId, date });
+  if (rest === '') return base;
+  return `${base}${base.includes('?') ? '&' : '?'}${rest.slice(1)}`;
 }
 
 function AttendanceSkeleton() {

@@ -17,7 +17,16 @@ import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle 
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel } from '@/components/ui/states';
 import { getSiteBoard } from '@/lib/obras-api';
-import { readSiteBoardCache, siteBoardCacheKey, writeSiteBoardCache } from '@/lib/obras-board-cache';
+import {
+  downloadSiteBoardCsv,
+  fetchComparedSiteBoard,
+  readSiteBoardCache,
+  siteBoardCacheKey,
+  writeSiteBoardCache,
+  type ComparedSiteBoard,
+  type ObrasBoardCompareMode,
+} from '@/lib/obras-board-cache';
+import { saveTextFile } from '@/lib/salud-download';
 import { formatElapsed, formatUtcDateLong } from '@/lib/salud-time';
 import { formatQuantity } from '@/lib/format';
 import { useResource } from '@/lib/use-resource';
@@ -75,6 +84,9 @@ export function SiteBoardPanel({
   className,
 }: SiteBoardPanelProps) {
   const [pollMs, setPollMs] = useState(OBRAS_BOARD_POLL_DEFAULT_MS);
+  const [compare, setCompare] = useState<ObrasBoardCompareMode>('off');
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const cacheKey = siteBoardCacheKey(siteId, date);
@@ -86,6 +98,18 @@ export function SiteBoardPanel({
 
   const reloadSilently = board.reloadSilently;
   const data = board.data;
+
+  // Day-vs-−7d comparison (`GET ...?compare=previous-week`). `off` resolves
+  // to `null` without a request; any other mode reads fresh, outside the
+  // one-minute board cache.
+  const compareKey = `compare|${cacheKey}|${compare}`;
+  const compared = useResource<ComparedSiteBoard | null>(compareKey, (signal) =>
+    compare === 'off'
+      ? Promise.resolve(null)
+      : fetchComparedSiteBoard(siteId, { date }, signal),
+  );
+  const delta = compared.data?.delta ?? null;
+  const previousDate = compared.data?.previous.date ?? null;
 
   // A board is only rendered when it belongs to the key on screen: either the
   // answer for that key, or a cached board the hook seeded for it. Otherwise the
@@ -129,6 +153,19 @@ export function SiteBoardPanel({
   }, [refreshToken, reloadSilently]);
 
   const setPollPeriod = useCallback((value: number) => setPollMs(clampObrasBoardPollMs(value)), []);
+
+  const downloadCsv = useCallback(async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const file = await downloadSiteBoardCsv(siteId, { date });
+      saveTextFile(file.filename, file.csv);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : 'No se pudo descargar el CSV.');
+    } finally {
+      setDownloading(false);
+    }
+  }, [siteId, date]);
 
   return (
     <Card className={className} id="tablero-obra">
@@ -175,6 +212,45 @@ export function SiteBoardPanel({
           </Button>
         </div>
 
+        {/* Comparison and export: the drift reads `?compare=previous-week`
+            (day vs −7d, attendance only — progress, stock, assets and
+            milestones are scope-state) and the CSV carries the same aggregates
+            and `LIMIT` as the JSON board. */}
+        <div role="group" aria-label="Comparativa y descarga" className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">Comparativa:</span>
+          {[
+            { label: 'Sin comparativa', value: 'off' as ObrasBoardCompareMode },
+            { label: 'Semana anterior (−7 d)', value: 'previous-week' as ObrasBoardCompareMode },
+          ].map((option) => (
+            <Button
+              key={option.value}
+              variant={compare === option.value ? 'outline' : 'ghost'}
+              size="sm"
+              aria-pressed={compare === option.value}
+              onClick={() => setCompare(option.value)}
+            >
+              {option.label}
+            </Button>
+          ))}
+          <Button variant="outline" size="sm" onClick={downloadCsv} disabled={downloading}>
+            {downloading ? 'Descargando…' : 'Descargar CSV'}
+          </Button>
+          {compare !== 'off' && compared.loading ? (
+            <span className="text-xs text-muted-foreground">leyendo comparativa…</span>
+          ) : null}
+        </div>
+
+        {compared.failure !== null && compare !== 'off' ? (
+          <p role="alert" className="text-xs text-destructive">
+            No se pudo leer la comparativa: {compared.failure.message}
+          </p>
+        ) : null}
+        {downloadError !== null ? (
+          <p role="alert" className="text-xs text-destructive">
+            No se pudo descargar el CSV: {downloadError}
+          </p>
+        ) : null}
+
         {board.failure !== null ? (
           <FailurePanel
             title="No se pudo leer el tablero de la obra"
@@ -188,6 +264,8 @@ export function SiteBoardPanel({
         {visibleBoard === null ? null : (
           <BoardBody
             board={visibleBoard}
+            delta={delta}
+            previousDate={previousDate}
             onPickItem={onPickItem}
             onPickAsset={onPickAsset}
             onPickMilestone={onPickMilestone}
@@ -201,11 +279,15 @@ export function SiteBoardPanel({
 /** The five blocks of §6.2, in the order the consolidated bases list them. */
 function BoardBody({
   board,
+  delta,
+  previousDate,
   onPickItem,
   onPickAsset,
   onPickMilestone,
 }: {
   readonly board: SiteBoard;
+  readonly delta: Readonly<Record<string, number>> | null;
+  readonly previousDate: string | null;
   readonly onPickItem?: (item: CriticalStockBoard) => void;
   readonly onPickAsset?: (asset: MaintenanceAssetBoard) => void;
   readonly onPickMilestone?: (milestone: UpcomingMilestoneBoard) => void;
@@ -266,10 +348,10 @@ function BoardBody({
       <section className="flex flex-col gap-2">
         <h3 className="text-[0.8125rem] font-medium">Asistencia del día</h3>
         <div className="grid gap-3 sm:grid-cols-4">
-          <Kpi label="Registradas" value={String(attendance.registered)} />
-          <Kpi label="Aprobadas" value={String(attendance.approved)} />
-          <Kpi label="Rechazadas" value={String(attendance.rejected)} />
-          <Kpi label="Ajustadas" value={String(attendance.adjusted)} />
+          <Kpi label="Registradas" value={String(attendance.registered)} delta={deltaText(delta, 'attendanceRegistered', previousDate)} />
+          <Kpi label="Aprobadas" value={String(attendance.approved)} delta={deltaText(delta, 'attendanceApproved', previousDate)} />
+          <Kpi label="Rechazadas" value={String(attendance.rejected)} delta={deltaText(delta, 'attendanceRejected', previousDate)} />
+          <Kpi label="Ajustadas" value={String(attendance.adjusted)} delta={deltaText(delta, 'attendanceAdjusted', previousDate)} />
         </div>
         <p className="tabular text-xs text-muted-foreground">Total del día: {attendance.total}</p>
       </section>
@@ -377,13 +459,29 @@ function BoardBody({
   );
 }
 
-function Kpi({ label, value }: { readonly label: string; readonly value: string }) {
+function Kpi({ label, value, delta }: { readonly label: string; readonly value: string; readonly delta?: string }) {
   return (
     <div className={cn('rounded-md border border-border bg-card px-3 py-2.5')}>
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="tabular text-lg font-medium">{value}</p>
+      {delta === undefined ? null : (
+        <p className="tabular text-xs text-muted-foreground">{delta}</p>
+      )}
     </div>
   );
+}
+
+/** Drift of one KPI (`current − previous`), or `undefined` when not comparing. */
+function deltaText(
+  delta: Readonly<Record<string, number>> | null,
+  key: string,
+  previousDate: string | null,
+): string | undefined {
+  if (delta === null || previousDate === null) return undefined;
+  const value = delta[key];
+  if (value === undefined) return undefined;
+  const signed = value > 0 ? `+${value}` : String(value);
+  return `${signed} vs ${previousDate}`;
 }
 
 /** Shaped skeleton of the five blocks, so the layout never jumps. */

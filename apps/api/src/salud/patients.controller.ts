@@ -2,7 +2,7 @@
 // (bases-consolidadas-v1.md §3.3, §6.1). No domain logic and no permission
 // checks live here: every handler forwards the request-bound tenant client to
 // the service, which owns the guard, the SQL and the write audit.
-import { Body, Controller, Get, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 import {
   actorFromRequest,
@@ -17,8 +17,11 @@ import {
 export class PatientsController {
   /** `GET /v1/salud/patients` — patient files inside the caller scope. */
   @Get()
-  list(@Req() req: TenantScopedRequest): Promise<PatientRecord[]> {
-    return listPatients(actorFromRequest(req));
+  list(
+    @Req() req: TenantScopedRequest,
+    @Query('saved_view_id') savedViewId?: string,
+  ): Promise<PatientRecord[]> {
+    return listPatients(actorFromRequest(req), savedViewId ?? null);
   }
 
   /** `POST /v1/salud/patients` — register a patient file (`patient.write`). */

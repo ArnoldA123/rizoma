@@ -3,16 +3,19 @@
 import Link from 'next/link';
 import { useState } from 'react';
 import type { PatientRecord } from '@rizoma/contracts';
+import { patientListSchema } from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { SkeletonRows } from '@/components/ui/skeleton';
 import { PatientForm } from '@/components/salud/patient-form';
+import { ViewSelector } from '@/components/views/view-selector';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { DEV_IDENTITY } from '@/lib/config';
+import { requestJson } from '@/lib/api-client';
+import { withSavedView } from '@/lib/views-api';
 import { documentTypeLabel, roleLabel } from '@/lib/labels';
-import { listPatients } from '@/lib/salud-api';
 import { PAGE_SIZE, paginate } from '@/lib/salud-select';
 import { formatUtcDate } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
@@ -41,6 +44,23 @@ import { cn } from '@/lib/utils';
  *     renders a typed error state with the envelope it can state and the trace id
  *     it received, rather than a generic "error".
  */
+/**
+ * Reads the patient list through the proxy, narrowed by the active saved view.
+ * The API applies the view's exact-equality bag server-side; a missing view is
+ * 404 and an entity mismatch is 400, both surfaced as a typed failure panel.
+ */
+async function readPatients(
+  savedViewId: string | null,
+  signal: AbortSignal,
+): Promise<PatientRecord[]> {
+  const rows = await requestJson(
+    withSavedView('/salud/patients', savedViewId),
+    patientListSchema,
+    { signal },
+  );
+  return rows ?? [];
+}
+
 export interface PatientsBrowserProps {
   readonly role: string | null;
   /** `patient.read` — the role may list and open patient files. */
@@ -50,13 +70,17 @@ export interface PatientsBrowserProps {
 }
 
 export function PatientsBrowser({ role, canRead, canWrite }: PatientsBrowserProps) {
+  // The active saved view narrows the server list via `?saved_view_id=`; null
+  // reads the unfiltered scope. The id joins the resource key so a pick
+  // refetches through the same abort-safe path as every other list read.
+  const [viewId, setViewId] = useState<string | null>(null);
   // The list is only requested when the role may read it. A role without
   // `patient.read` must not fire a call the guard mirror already knows the API
   // would answer with 403 `role.denied`: the empty promise is the honest
   // "nothing to read", and the screen says why instead of showing an error it
   // caused itself.
-  const patients = useResource<PatientRecord[]>('patients', (signal) =>
-    canRead ? listPatients(signal) : Promise.resolve([]),
+  const patients = useResource<PatientRecord[]>(`patients:${viewId ?? ''}`, (signal) =>
+    canRead ? readPatients(viewId, signal) : Promise.resolve([]),
   );
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState('');
@@ -97,6 +121,14 @@ export function PatientsBrowser({ role, canRead, canWrite }: PatientsBrowserProp
           </CardHeader>
 
           <CardContent className="flex flex-col gap-4">
+            <ViewSelector
+              entity="patients"
+              selectedId={viewId}
+              onSelect={(next) => {
+                setViewId(next);
+                setPage(1);
+              }}
+            />
             <div className="flex flex-wrap items-center gap-3">
               <label htmlFor="patient-filter" className="sr-only">
                 Filtrar por nombre o documento

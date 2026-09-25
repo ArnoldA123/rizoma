@@ -55,6 +55,11 @@
 // the tenant-admin gate, the digest-only secret handling and the write audit,
 // following the same split. Verification itself lives in the `X-Api-Key`
 // branch of `TenantContextMiddleware`, before Bearer.
+// A15b (MVP2 B1) mounts the saved-view endpoints: `views/views.controller.ts`
+// is thin and decorator-only — the plain `views/views.service.ts` owns
+// validation, the tenant+owner scope, the SQL and the write audit, following
+// the same split. `?saved_view_id=` resolution for the four listings
+// (`resolveSavedViewForList` + `buildSavedViewConditions`) lives there too.
 // A15 (MVP2 W2) mounts the webhook endpoints: `webhooks/webhooks.controller.ts`
 // is thin and decorator-only — the plain `webhooks/webhooks.ts` owns
 // validation, the tenant-admin gate, the digest-only signing secrets, the
@@ -67,6 +72,12 @@
 // the tenant-admin gate, the `to` → `recipient` mapping, the same-tx
 // `enqueueNotify` writer over `message_log`, the worker-owned `mark*`
 // transitions and the active-template reads with `{{var}}` render.
+//
+// A17 (MVP2 B5) mounts the policy preview: `policy/policy.controller.ts` is
+// thin and decorator-only — the plain `policy/policy.service.ts` owns the
+// query validation, the matrix read (`auth/policy.ts`) and the catalog read
+// (`state_transitions`). Read-only by construction (one `SELECT`, no auth
+// beyond the tenant the middleware already bound): audit, not enforcement.
 //
 // Only the JWT verifier needs a provider: the guard is a pure function over
 // facts the endpoint owns (identity, membership, entity, module), so there is
@@ -92,6 +103,7 @@ import {
   type NestModule,
 } from '@nestjs/common';
 import { ApiKeysController } from './auth/api-keys.controller.ts';
+import { PolicyController } from './policy/policy.controller.ts';
 import { WebhooksController } from './webhooks/webhooks.controller.ts';
 import {
   AUTH_JWT_VERIFIER,
@@ -101,6 +113,7 @@ import {
 import { CONFIG_TOKEN, load, type ApiConfig } from './config/configuration.ts';
 import { HealthController, REDIS_CLIENT, createRedisClient } from './health/health.controller.ts';
 import { BillingController } from './billing/billing.controller.ts';
+import { CustomFieldsController } from './custom-fields/custom-fields.controller.ts';
 import { FilesController } from './files/files.controller.ts';
 import { NotifyController } from './notify/notify.controller.ts';
 import { OnboardingController } from './onboarding/onboarding.controller.ts';
@@ -113,6 +126,7 @@ import { PatientsController } from './salud/patients.controller.ts';
 import { PrescriptionsController } from './salud/prescriptions.controller.ts';
 import { TriagesController } from './salud/triages.controller.ts';
 import { AttendanceController } from './obras/attendance.controller.ts';
+import { ViewsController } from './views/views.controller.ts';
 import { AssetsController } from './obras/assets.controller.ts';
 import { ObrasDashboardsController } from './obras/dashboards.controller.ts';
 import { ObrasImportsController } from './obras/import.controller.ts';
@@ -141,15 +155,18 @@ import {
     TriagesController,
     PrescriptionsController,
     BillingController,
+    CustomFieldsController,
     FilesController,
     NotifyController,
     ApiKeysController,
+    PolicyController,
     WebhooksController,
     ImportsController,
     DashboardsController,
     SitesController,
     StaffController,
     AttendanceController,
+    ViewsController,
     AssetsController,
     StockController,
     ProgressController,
