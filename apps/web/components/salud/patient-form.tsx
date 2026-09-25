@@ -1,12 +1,14 @@
 'use client';
 
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { z } from 'zod';
 import {
   DOCUMENT_TYPES,
   PATIENT_NAME_MAX,
   checkDateField,
   checkDocumentNumberField,
   checkDocumentTypeField,
+  checkOptionalText,
   checkRequiredText,
   checkUuidField,
   firstIssue,
@@ -15,6 +17,7 @@ import {
   type PatientCreateInput,
   type PatientRecord,
 } from '@rizoma/contracts';
+import { requestJson } from '@/lib/api-client';
 import { CharCounter, FieldMessage, SavedPulse, fieldStateProps } from '@/components/ui/field-feedback';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
@@ -82,6 +85,61 @@ function initialDraft(orgNodeId: string): Draft {
   };
 }
 
+/**
+ * Typed custom key of `patient_files.contacts` (B2). Local schema until
+ * `packages/contracts/src/index.ts` re-exports `./custom-fields.ts` — it
+ * mirrors `customFieldDefSchema` field by field, so the section below renders
+ * exactly the `active` definitions the API would enforce on arrival.
+ */
+const customFieldDefSchema = z.object({
+  id: z.string(),
+  module: z.string(),
+  entity: z.string(),
+  code: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
+  type: z.enum(['text', 'number', 'date', 'boolean']),
+  required: z.boolean(),
+  status: z.string(),
+});
+type CustomFieldDef = z.infer<typeof customFieldDefSchema>;
+
+/** Free-text custom value cap; the API stores the bag as JSONB, not a column. */
+const CUSTOM_TEXT_MAX = 500;
+
+/** Live check of one custom value, mirroring `validateCustomValues` server-side. */
+function checkCustomField(def: CustomFieldDef, raw: string): FieldCheck {
+  const field = `custom.${def.code}`;
+  const value = (raw ?? '').trim();
+  if (value === '') return def.required ? { field, code: 'required' } : null;
+  switch (def.type) {
+    case 'number':
+      return Number.isFinite(Number(value)) ? null : { field, code: 'invalid_number' };
+    case 'date':
+      return checkDateField(field, value);
+    case 'boolean':
+      return null;
+    case 'text':
+      return def.required
+        ? checkRequiredText(field, value, CUSTOM_TEXT_MAX)
+        : checkOptionalText(field, value, CUSTOM_TEXT_MAX);
+  }
+}
+
+/** Parses the string-held custom values into the JSONB bag the API types. */
+function parseCustomValues(
+  defs: readonly CustomFieldDef[],
+  values: Readonly<Record<string, string>>,
+): Record<string, unknown> {
+  const bag: Record<string, unknown> = {};
+  for (const def of defs) {
+    const raw = (values[def.code] ?? '').trim();
+    if (raw === '') continue;
+    if (def.type === 'number') bag[def.code] = Number(raw);
+    else if (def.type === 'boolean') bag[def.code] = raw === 'true';
+    else bag[def.code] = raw;
+  }
+  return bag;
+}
+
 /** Splits a comma-separated free-text list into the array the API stores. */
 function splitList(value: string): string[] {
   return value
@@ -103,6 +161,31 @@ export function PatientForm({
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [created, setCreated] = useState<PatientRecord | null>(null);
+  // B2 custom keys of `contacts`: `active` definitions of (salud, patient).
+  // A failed read degrades to no section — the API still enforces on arrival.
+  const [customDefs, setCustomDefs] = useState<readonly CustomFieldDef[]>([]);
+  const [customValues, setCustomValues] = useState<Readonly<Record<string, string>>>({});
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    requestJson(
+      '/custom-fields?module=salud&entity=patient&status=active',
+      z.array(customFieldDefSchema),
+      { signal: controller.signal },
+    )
+      .then((rows) => {
+        if (!active) return;
+        setCustomDefs((rows ?? []).filter((def) => def.status === 'active'));
+      })
+      .catch(() => {
+        if (active) setCustomDefs([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   // Recomputed on every render: these checks are pure and cheap, which is what
   // makes "validate while typing" a plain derived value instead of an effect.
@@ -117,8 +200,14 @@ export function PatientForm({
       ),
       birthdate: checkDateField('birthdate', draft.birthdate),
       orgNodeId: checkUuidField('orgNodeId', draft.orgNodeId),
+      ...Object.fromEntries(
+        customDefs.map((def) => [
+          `custom.${def.code}`,
+          checkCustomField(def, customValues[def.code] ?? ''),
+        ]),
+      ),
     }),
-    [draft],
+    [draft, customDefs, customValues],
   );
 
   const blocking = submitted ? firstIssue(checks) : null;
@@ -148,7 +237,10 @@ export function PatientForm({
         birthdate: draft.birthdate.trim() === '' ? null : draft.birthdate.trim(),
         allergies: splitList(draft.allergies),
         alerts: splitList(draft.alerts),
-        contacts: draft.phone.trim() === '' ? {} : { phone: draft.phone.trim() },
+        contacts: {
+          ...(draft.phone.trim() === '' ? {} : { phone: draft.phone.trim() }),
+          ...parseCustomValues(customDefs, customValues),
+        },
       };
       const patient = await createPatient(input);
       setCreated(patient);
@@ -156,6 +248,7 @@ export function PatientForm({
       // The sede is kept: registering several files for the same sede is the
       // normal case at a front desk.
       setDraft(initialDraft(patient.orgNodeId));
+      setCustomValues({});
       setTouched({});
       setSubmitted(false);
     } catch (error) {
@@ -307,6 +400,72 @@ export function PatientForm({
                 onChange={(event) => set('alerts', event.target.value)}
               />
             </LiveField>
+
+            {customDefs.length === 0 ? null : (
+              <fieldset className="flex flex-col gap-4 rounded-md border border-border bg-secondary p-4 sm:col-span-2">
+                <legend className="px-1 text-[0.8125rem] font-medium">
+                  Campos personalizados
+                </legend>
+                <p className="text-xs text-muted-foreground">
+                  Claves tipadas del tenant para esta ficha. Viajan dentro de{' '}
+                  <code className="font-mono">contacts</code> y el API las valida por tipo.
+                </p>
+                {customDefs.map((def) => {
+                  const field = `custom.${def.code}`;
+                  const raw = customValues[def.code] ?? '';
+                  return (
+                    <LiveField
+                      key={def.code}
+                      id={`patient-custom-${def.code}`}
+                      label={`${def.code}${def.required ? ' *' : ''}`}
+                      hint={
+                        def.type === 'date'
+                          ? 'Fecha real en formato AAAA-MM-DD.'
+                          : def.type === 'boolean'
+                            ? 'Marcado es verdadero, sin marcar es falso.'
+                            : undefined
+                      }
+                      issue={checks[field] ?? null}
+                      touched={show(field)}
+                    >
+                      {def.type === 'boolean' ? (
+                        <input
+                          id={`patient-custom-${def.code}`}
+                          name={field}
+                          type="checkbox"
+                          className="h-4 w-4"
+                          checked={raw === 'true'}
+                          onChange={(event) =>
+                            setCustomValues((current) => ({
+                              ...current,
+                              [def.code]: event.target.checked ? 'true' : 'false',
+                            }))
+                          }
+                          onBlur={() => touch(field)}
+                        />
+                      ) : (
+                        <Input
+                          id={`patient-custom-${def.code}`}
+                          name={field}
+                          autoComplete="off"
+                          inputMode={def.type === 'number' ? 'decimal' : undefined}
+                          placeholder={def.type === 'date' ? 'AAAA-MM-DD' : undefined}
+                          value={raw}
+                          onChange={(event) =>
+                            setCustomValues((current) => ({
+                              ...current,
+                              [def.code]: event.target.value,
+                            }))
+                          }
+                          onBlur={() => touch(field)}
+                          {...fieldStateProps(checks[field] ?? null, show(field))}
+                        />
+                      )}
+                    </LiveField>
+                  );
+                })}
+              </fieldset>
+            )}
 
             <LiveField
               id="patient-org-node"
