@@ -22,6 +22,7 @@ import { HttpException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
+import { NOTIFY_TEMPLATE_APPOINTMENT_SCHEDULED, tryEnqueueNotify } from '../notify/notify.service.ts';
 import type { HeaderRecord, TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 
 /** Tenant module this vertical requires (§3.1 property 6 / §3.5). */
@@ -878,7 +879,54 @@ export async function createAppointment(
     orgNodeId: appointment.orgNodeId,
     diff: { patientId: appointment.patientId, startsAt: appointment.startsAt },
   });
+  // Best-effort `appointment.scheduled` notice, same transaction: the channel
+  // follows the contact data on file (email first, sms fallback); a patient
+  // without either address — or without an active template — skips silently.
+  await tryNotifyAppointmentScheduled(actor, appointment);
   return appointment;
+}
+
+/** First non-blank string under any of the contact keys, or null. */
+function readContactAddress(contacts: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = contacts[key];
+    if (typeof value === 'string' && value.trim() !== '') return value.trim();
+  }
+  return null;
+}
+
+/**
+ * Enqueues the `appointment.scheduled` notice in the creation transaction
+ * (same `client`, no BEGIN/COMMIT): the `queued` row commits or rolls back
+ * with the appointment. Never throws — every skip or enqueue failure
+ * resolves silently so scheduling never breaks.
+ */
+async function tryNotifyAppointmentScheduled(
+  actor: ActorContext,
+  appointment: AppointmentRecord,
+): Promise<void> {
+  try {
+    const patient = await findPatient(actor, appointment.patientId);
+    if (patient === null) return;
+    const email = readContactAddress(patient.contacts, ['email']);
+    const phone = readContactAddress(patient.contacts, ['phone']);
+    const channel = email !== null ? 'email' : phone !== null ? 'sms' : null;
+    const to = email ?? phone;
+    if (channel === null || to === null) return;
+    await tryEnqueueNotify(actor.client, actor.tenantId, {
+      channel,
+      template: NOTIFY_TEMPLATE_APPOINTMENT_SCHEDULED,
+      to,
+      payload: {
+        appointmentId: appointment.id,
+        patientId: appointment.patientId,
+        startsAt: appointment.startsAt,
+        durationMin: appointment.durationMin,
+      },
+    });
+  } catch {
+    // Best-effort: scheduling owns the transaction, the notice never blocks it.
+  }
 }
 
 /** Reads one appointment; its own sede drives the scope check. */

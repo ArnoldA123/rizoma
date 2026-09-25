@@ -37,6 +37,7 @@ import { canActivate, loadMembership, type MembershipRecord } from '../auth/acce
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
 import { SALUD_MODULE, actorFromRequest, type ActorContext, type SaludClient } from '../salud/salud.service.ts';
 import { enqueueInvoiceWebhooks } from '../webhooks/webhooks.ts';
+import { NOTIFY_TEMPLATE_INVOICE_ISSUED, tryEnqueueNotify } from '../notify/notify.service.ts';
 
 export { actorFromRequest };
 export type { ActorContext, SaludClient };
@@ -675,6 +676,8 @@ interface InvoiceIssueInput {
   readonly customerDocType: string;
   readonly customerDocNumber: string;
   readonly customerName: string;
+  /** Optional recipient of the `invoice.issued` email; null = skip silently. */
+  readonly customerEmail: string | null;
   readonly igvRate: number;
   readonly cashSessionId: string | null;
   readonly lines: InvoiceLine[];
@@ -716,6 +719,15 @@ function parseInvoiceIssue(body: unknown, traceId: string): InvoiceIssueInput {
   const rawItems = toJsonArray(record.items);
   if (rawItems.length === 0) throw billingError(BILLING_ERROR.invalidItems, 'items must be a non-empty array', 400, traceId);
 
+  // Optional `invoice.issued` recipient: the caller copies it from the patient
+  // contacts when known. Absent means "no address on file" and the emitter
+  // skips the notification silently; a present but malformed address is a 400
+  // like any other customer field.
+  const rawEmail = readString(record.customerEmail)?.trim() ?? '';
+  if (rawEmail.length > 320 || (rawEmail !== '' && !rawEmail.includes('@'))) {
+    throw billingError(BILLING_ERROR.invalidCustomer, 'customerEmail must be an email address', 400, traceId);
+  }
+
   return {
     orgNodeId,
     quoteId: optionalUuid(record, 'quoteId', traceId),
@@ -723,6 +735,7 @@ function parseInvoiceIssue(body: unknown, traceId: string): InvoiceIssueInput {
     customerDocType,
     customerDocNumber,
     customerName: requireString(record, 'customerName', BILLING_ERROR.invalidCustomer, traceId),
+    customerEmail: rawEmail === '' ? null : rawEmail,
     igvRate,
     cashSessionId: optionalUuid(record, 'cashSessionId', traceId),
     lines: parseLines(rawItems, traceId),
@@ -732,6 +745,35 @@ function parseInvoiceIssue(body: unknown, traceId: string): InvoiceIssueInput {
 /** Stable digest of the issue body; the replay/conflict key of base §5.1. */
 function requestHashOf(input: InvoiceIssueInput): string {
   return createHash('sha256').update(JSON.stringify(input)).digest('hex');
+}
+
+/**
+ * Enqueues the `invoice.issued` email in the issue transaction (same
+ * `client`, no BEGIN/COMMIT): the `queued` row commits or rolls back with
+ * the invoice. Best-effort by design — a null/blank address (no email on
+ * file) or a missing active template resolves silently so the emission never
+ * breaks. The idempotency replay path returns before this point, so a retry
+ * never double-enqueues.
+ */
+async function tryNotifyInvoiceIssued(
+  actor: ActorContext,
+  invoice: InvoiceRecord,
+  customerEmail: string | null,
+): Promise<void> {
+  const to = customerEmail?.trim() ?? '';
+  if (to === '') return;
+  await tryEnqueueNotify(actor.client, actor.tenantId, {
+    channel: 'email',
+    template: NOTIFY_TEMPLATE_INVOICE_ISSUED,
+    to,
+    payload: {
+      invoiceId: invoice.id,
+      serie: invoice.serie,
+      numero: invoice.numero,
+      total: invoice.total,
+      customerName: invoice.customerName,
+    },
+  });
 }
 
 // ============ cash sessions ============
@@ -1104,6 +1146,9 @@ export async function issueInvoice(
       invoiceId: invoice.id,
       payload: { invoiceId: invoice.id, serie: invoice.serie, numero: invoice.numero, total: invoice.total },
     });
+    // Best-effort `invoice.issued` email, same transaction: a missing address
+    // or a missing active template skips silently, never breaking the issue.
+    await tryNotifyInvoiceIssued(actor, invoice, input.customerEmail);
     await writeAudit(actor, membership, {
       action: 'invoice.issued',
       entity: 'invoice',
