@@ -13,7 +13,12 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { PATH_HEADER, SESSION_COOKIE } from './lib/config';
 import { DEV_HEADERS_ENABLED } from './lib/server-config';
-import { decodeSession, sessionIsExpired } from './lib/session-codec';
+import {
+  REFRESH_COOKIE,
+  decodeSession,
+  hasRenewableSession,
+  sessionIsExpired,
+} from './lib/session-codec';
 
 /** Paths reachable without a session. */
 const PUBLIC_PATHS: readonly string[] = ['/login'];
@@ -29,8 +34,27 @@ export function middleware(request: NextRequest): NextResponse {
 
   if (PUBLIC_PATHS.includes(pathname)) return continueWithPath(request, pathname);
 
-  const tokens = decodeSession(request.cookies.get(SESSION_COOKIE)?.value);
+  const sessionRaw = request.cookies.get(SESSION_COOKIE)?.value;
+  const tokens = decodeSession(sessionRaw);
   if (tokens !== null && !sessionIsExpired(tokens)) return continueWithPath(request, pathname);
+
+  // Expired access token but a stored refresh grant: let the request through
+  // instead of bouncing to `/login`. Renewal happens lazily downstream — the
+  // `proxy` and `session` Route Handlers call `ensureFreshAccessToken` and
+  // re-persist the new token set on their own responses.
+  //
+  // Decision (pass-through vs. renewing here): the Edge runtime is the wrong
+  // place for the realm round-trip. It would put token-endpoint config and a
+  // network call with its own failure modes on the hot path of every page
+  // navigation, and the renewal helper pulls `node:crypto` via `oidc.ts`,
+  // which must stay out of the Edge bundle — hence the refresh codec lives in
+  // the Edge-safe `session-codec.ts`. The gate stays fail-closed: a missing
+  // or malformed refresh grant still falls through to `/login`, and a realm
+  // rejection downstream still clears both cookies, so the next load lands on
+  // `/login` anyway.
+  if (hasRenewableSession(sessionRaw, request.cookies.get(REFRESH_COOKIE)?.value)) {
+    return continueWithPath(request, pathname);
+  }
 
   // Outside production the shell stays reachable with the documented local
   // identity headers, so the UI can be exercised while Keycloak is down. In

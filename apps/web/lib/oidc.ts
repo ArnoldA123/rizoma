@@ -110,6 +110,43 @@ function readTokenSet(body: Record<string, unknown>): TokenSet {
   };
 }
 
+/**
+ * Shared POST for the realm token endpoint (code exchange and refresh alike).
+ * `rizoma-web` is a public client: PKCE or the refresh token authenticates
+ * the call, so no client secret is ever sent.
+ */
+async function postTokenForm(
+  endpoint: string,
+  form: URLSearchParams,
+  rejectionPrefix: string,
+  fetchImpl: typeof fetch,
+): Promise<TokenSet> {
+  let response: Response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new OidcError('oidc.unreachable', `Realm inalcanzable: ${detail}`, 502);
+  }
+
+  if (!response.ok) {
+    const failure = await readRealmError(response);
+    throw new OidcError(
+      `oidc.${failure.error}`,
+      `${rejectionPrefix}: ${failure.description}`,
+      401,
+    );
+  }
+
+  const body = (await response.json()) as Record<string, unknown>;
+  return readTokenSet(body);
+}
+
 /** Exchanges an authorization `code` for a token set (PKCE, no secret). */
 export async function exchangeCodeForTokens(
   input: {
@@ -128,31 +165,41 @@ export async function exchangeCodeForTokens(
     code: input.code,
     code_verifier: input.codeVerifier,
   });
+  return postTokenForm(
+    input.tokenEndpoint,
+    form,
+    'El realm rechazó el canje del código',
+    fetchImpl,
+  );
+}
 
-  let response: Response;
-  try {
-    response = await fetchImpl(input.tokenEndpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: form.toString(),
-      signal: AbortSignal.timeout(5_000),
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new OidcError('oidc.unreachable', `Realm inalcanzable: ${detail}`, 502);
-  }
-
-  if (!response.ok) {
-    const failure = await readRealmError(response);
-    throw new OidcError(
-      `oidc.${failure.error}`,
-      `El realm rechazó el canje del código: ${failure.description}`,
-      401,
-    );
-  }
-
-  const body = (await response.json()) as Record<string, unknown>;
-  return readTokenSet(body);
+/**
+ * Renews the token set with `grant_type=refresh_token` (public client, no
+ * secret). The realm may rotate the refresh token: callers must persist
+ * `refreshToken` again whenever it differs from the one they sent. An
+ * `oidc.invalid_grant` failure means the refresh token expired or was
+ * revoked, and the session has to end; `oidc.unreachable` is transient and
+ * must not clear stored credentials.
+ */
+export async function refreshAccessTokens(
+  input: {
+    readonly tokenEndpoint: string;
+    readonly clientId: string;
+    readonly refreshToken: string;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<TokenSet> {
+  const form = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: input.clientId,
+    refresh_token: input.refreshToken,
+  });
+  return postTokenForm(
+    input.tokenEndpoint,
+    form,
+    'El realm rechazó la renovación',
+    fetchImpl,
+  );
 }
 
 /**

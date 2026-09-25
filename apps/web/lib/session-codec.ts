@@ -13,9 +13,11 @@
 // `tokenType`). Refresh and ID tokens used to travel in it too and roughly
 // tripled its size (~2.9KB), which lost the race against browser per-cookie
 // limits after the OIDC callback redirect — the `Set-Cookie` never stuck and
-// `/` kept answering `tenant.missing`. Neither token feeds identity (only the
-// access token does), so they are dropped at write time; `decodeSession`
-// still reads cookies written in the old full shape.
+// `/` kept answering `tenant.missing`. They now live in a second `HttpOnly`
+// cookie (`REFRESH_COOKIE`, declared below), so each cookie stays well
+// under the ~4KB practical limit. Neither token feeds identity (only the
+// access token does), and `decodeSession` still reads cookies written in the
+// old full shape.
 //
 // The encoding avoids `Buffer`/base64 so the module stays Edge-compatible.
 
@@ -51,13 +53,26 @@ export interface OidcFlowState {
 }
 
 function encodeJson(value: unknown): string {
+  return encodeCookiePayload(value);
+}
+
+function decodeJson(raw: string): unknown {
+  return decodeCookiePayload(raw);
+}
+
+/**
+ * base64url JSON for cookie payloads. Shared with `refresh.ts` so both
+ * cookies use the same alphabet; it avoids `Buffer`/base64 so the module
+ * stays Edge-compatible.
+ */
+export function encodeCookiePayload(value: unknown): string {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function decodeJson(raw: string): unknown {
+export function decodeCookiePayload(raw: string): unknown {
   const padded = raw.replace(/-/g, '+').replace(/_/g, '/');
   const padLength = (4 - (padded.length % 4)) % 4;
   const binary = atob(padded + '='.repeat(padLength));
@@ -74,7 +89,8 @@ function readString(value: unknown): string | undefined {
  * Serializes the slim session for the cookie: access token + expiry + type.
  * Refresh and ID tokens are deliberately left out — they never feed identity
  * and keeping them pushed the cookie past what browsers reliably persist
- * after the callback redirect. The object is built field by field (never
+ * after the callback redirect. They are persisted separately in
+ * `REFRESH_COOKIE` (declared below). The object is built field by field (never
  * spread) so a full token set passed in by mistake still encodes slim.
  */
 export function encodeSession(tokens: SlimSession): string {
@@ -124,6 +140,78 @@ export function sessionIsExpired(
   skewMs = 30_000,
 ): boolean {
   return nowMs >= tokens.expiresAt - skewMs;
+}
+
+/**
+ * Second session cookie holding the refresh material. Declared here (not in
+ * `refresh.ts`) so the Edge middleware can gate on it without importing the
+ * realm client: `refresh.ts` pulls `node:crypto` via `oidc.ts`, which must
+ * stay out of the Edge bundle. `refresh.ts` re-exports this constant and the
+ * codec below, so Route Handlers keep importing them from there unchanged.
+ *
+ * Read by the Route Handlers that can renew (`proxy`, `session`) and by
+ * `logout` for the end-session `id_token_hint`; never sent to the browser JS
+ * (`HttpOnly`). The Edge middleware reads it only to decide the
+ * expired-but-renewable pass-through (see `hasRenewableSession`) — renewal
+ * itself still happens in Node, via `ensureFreshAccessToken`.
+ */
+export const REFRESH_COOKIE = 'rizoma_refresh';
+
+/** Refresh material persisted between renewals. */
+export interface RefreshStore {
+  readonly refreshToken: string;
+  /** Kept for the end-session `id_token_hint`; never feeds identity. */
+  readonly idToken: string | null;
+}
+
+/** Serializes the refresh material for `REFRESH_COOKIE`. */
+export function encodeRefresh(store: RefreshStore): string {
+  return encodeCookiePayload({
+    refreshToken: store.refreshToken,
+    idToken: store.idToken,
+  });
+}
+
+/** Parses `REFRESH_COOKIE`; `null` for absent, malformed or partial data. */
+export function decodeRefresh(raw: string | undefined | null): RefreshStore | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  let parsed: unknown;
+  try {
+    parsed = decodeCookiePayload(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const refreshToken = record.refreshToken;
+  if (typeof refreshToken !== 'string' || refreshToken === '') return null;
+  const idToken = record.idToken;
+  return {
+    refreshToken,
+    idToken: typeof idToken === 'string' && idToken !== '' ? idToken : null,
+  };
+}
+
+/**
+ * True when the request carries an expired session cookie plus a structurally
+ * valid refresh grant. The Edge gate uses this to let the request through for
+ * lazy downstream renewal instead of bouncing to `/login`.
+ *
+ * Fail-closed by construction: a missing or malformed session is never
+ * renewable (anonymous traffic keeps the `/login` redirect), a fresh session
+ * returns false (it takes the fast path above this check), and a missing or
+ * malformed refresh grant returns false. Structural validity is not proof the
+ * realm will accept the grant — a rejected refresh still clears both cookies
+ * downstream, so the next load lands on `/login` anyway.
+ */
+export function hasRenewableSession(
+  sessionRaw: string | undefined | null,
+  refreshRaw: string | undefined | null,
+  nowMs: number = Date.now(),
+): boolean {
+  const stored = decodeSession(sessionRaw);
+  if (stored === null || !sessionIsExpired(stored, nowMs)) return false;
+  return decodeRefresh(refreshRaw) !== null;
 }
 
 /** Serializes the transient login-callback state. */
