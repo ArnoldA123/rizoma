@@ -371,11 +371,18 @@ describe('salud API e2e (local stack)', () => {
     assert.equal(result.body.tenantId, TENANT_SALUD);
     assert.equal(result.body.orgNodeId, SEDE_A);
 
-    const stored = await db.query(
-      'SELECT person_name FROM patient_files WHERE tenant_id = $1 AND id = $2',
-      [TENANT_SALUD, id],
-    );
-    assert.equal(stored.rowCount, 1);
+    // Poll, like every other read-after-write in this suite: the tenant
+    // middleware commits on the response `finish` event, i.e. after the 201
+    // body is already in our hands, so one immediate SELECT can run before
+    // the COMMIT lands (CI-only flake at this exact line, `0 !== 1`).
+    const stored = await waitFor(async () => {
+      const result = await db.query(
+        'SELECT person_name FROM patient_files WHERE tenant_id = $1 AND id = $2',
+        [TENANT_SALUD, id],
+      );
+      return result.rowCount === 1 ? result : null;
+    });
+    assert.notEqual(stored, null, 'the patient row is committed');
 
     const audit = await auditByTraceEventually(result.traceId);
     assert.equal(audit.length, 1);
