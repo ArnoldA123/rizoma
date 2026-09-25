@@ -47,11 +47,17 @@ import {
   patientListSchema,
   patientRecordSchema,
   patientsImportInputSchema,
+  prescriptionCreateInputSchema,
+  prescriptionListSchema,
+  prescriptionRecordSchema,
   quoteCreateInputSchema,
   quoteListSchema,
   quoteRecordSchema,
   saludBoardQueryString,
   saludDashboardBoardSchema,
+  triageCreateInputSchema,
+  triageListSchema,
+  triageRecordSchema,
   type AppointmentCreateInput,
   type AppointmentRecord,
   type CashSessionCloseInput,
@@ -72,10 +78,14 @@ import {
   type PatientCreateInput,
   type PatientRecord,
   type PatientsImportInput,
+  type PrescriptionCreateInput,
+  type PrescriptionRecord,
   type QuoteCreateInput,
   type QuoteRecord,
   type SaludBoardQuery,
   type SaludDashboardBoard,
+  type TriageCreateInput,
+  type TriageRecord,
 } from '@rizoma/contracts';
 import type { ZodType } from 'zod';
 import { apiErrorFromResponse, newIdempotencyKey, proxyRequest, requestJson } from './api-client.ts';
@@ -198,6 +208,43 @@ export function listAppointments(signal?: AbortSignal): Promise<AppointmentRecor
 export function createAppointment(input: AppointmentCreateInput): Promise<AppointmentRecord> {
   const body = appointmentCreateInputSchema.parse(input);
   return postJson(`${BASE}/appointments`, body, appointmentRecordSchema);
+}
+
+// ============ triages ============
+
+/** `GET /v1/salud/triages?patient=` — vital-signs history (`patient.read`). */
+export function listTriages(patientId: string, signal?: AbortSignal): Promise<TriageRecord[]> {
+  return readList(
+    `${BASE}/triages?patient=${encodeURIComponent(patientId)}`,
+    triageListSchema,
+    signal,
+  );
+}
+
+/** `POST /v1/salud/triages` — records one vital-signs row (`patient.write`). */
+export function createTriage(input: TriageCreateInput): Promise<TriageRecord> {
+  const body = triageCreateInputSchema.parse(input);
+  return postJson(`${BASE}/triages`, body, triageRecordSchema);
+}
+
+// ============ prescriptions ============
+
+/** `GET /v1/salud/prescriptions?patient=` — order history (`patient.read`). */
+export function listPrescriptions(
+  patientId: string,
+  signal?: AbortSignal,
+): Promise<PrescriptionRecord[]> {
+  return readList(
+    `${BASE}/prescriptions?patient=${encodeURIComponent(patientId)}`,
+    prescriptionListSchema,
+    signal,
+  );
+}
+
+/** `POST /v1/salud/prescriptions` — creates one order (`episode.write`). */
+export function createPrescription(input: PrescriptionCreateInput): Promise<PrescriptionRecord> {
+  const body = prescriptionCreateInputSchema.parse(input);
+  return postJson(`${BASE}/prescriptions`, body, prescriptionRecordSchema);
 }
 
 // ============ POST plumbing ============
