@@ -1,0 +1,31 @@
+{
+  "name": "rizoma",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CRM maleable multivertical (Peru) — monorepo: NestJS API, Next.js web, workers, shared contracts.",
+  "engines": {
+    "node": ">=22.0.0 <23.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "compose:config": "docker compose -f infra/docker/compose.yml config",
+    "compose:up": "docker compose -f infra/docker/compose.yml --env-file infra/docker/.env up -d",
+    "compose:down": "docker compose -f infra/docker/compose.yml down",
+    "db:migrate": "for m in 001_core_foundation 002_onboarding 003_salud 004_facturacion 005_obras; do psql postgresql://rizoma:rizoma_demo_password@localhost:5432/rizoma -v ON_ERROR_STOP=1 -f db/migrations/$m.sql || exit 1; done",
+    "db:migrate:test": "psql postgresql://rizoma:rizoma_demo_password@localhost:5432/postgres -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS rizoma_t2_test;' -c 'CREATE DATABASE rizoma_t2_test;' && for m in 001_core_foundation 002_onboarding 003_salud 004_facturacion 005_obras; do psql postgresql://rizoma:rizoma_demo_password@localhost:5432/rizoma_t2_test -v ON_ERROR_STOP=1 -f db/migrations/$m.sql || exit 1; done",
+    "db:lint": "bash db/lint/rls_lint.sh db/migrations/001_core_foundation.sql db/migrations/002_onboarding.sql db/migrations/003_salud.sql db/migrations/004_facturacion.sql db/migrations/005_obras.sql",
+    "db:test-isolation": "psql postgresql://rizoma:rizoma_demo_password@localhost:5432/rizoma_t2_test -v ON_ERROR_STOP=1 -f db/tests/tenant_isolation.sql",
+    "probes": "bash scripts/probes/f0_probes.sh",
+    "probes:api": "bash scripts/probes/api_probes.sh",
+    "backup:drill": "bash scripts/backup/restore_drill.sh"
+  }
+}

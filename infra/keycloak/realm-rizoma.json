@@ -1,0 +1,89 @@
+{
+  "realm": "rizoma",
+  "enabled": true,
+  "displayName": "Rizoma (demo local)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "resetPasswordAllowed": true,
+  "defaultSignatureAlgorithm": "RS256",
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30,
+  "otpSupportedApplications": ["FreeOTP", "Google Authenticator"],
+  "passwordPolicy": "length(10)",
+  "roles": {
+    "realm": [
+      {"name": "ti_admin", "description": "Administración TI del tenant"},
+      {"name": "direccion", "description": "Dirección salud"},
+      {"name": "medico", "description": "Médico"},
+      {"name": "enfermeria", "description": "Enfermería"},
+      {"name": "recepcion", "description": "Recepción"},
+      {"name": "caja", "description": "Caja y facturación"},
+      {"name": "auditor", "description": "Auditor solo lectura"},
+      {"name": "gerente", "description": "Gerente construcción"},
+      {"name": "jefe_obra", "description": "Jefe de obra"},
+      {"name": "almacen", "description": "Almacén"},
+      {"name": "capataz", "description": "Capataz"},
+      {"name": "trabajador", "description": "Trabajador"},
+      {"name": "vendedor", "description": "Ventas transversal"},
+      {"name": "soporte", "description": "Soporte transversal"}
+    ]
+  },
+  "groups": [
+    {"name": "salud", "realmRoles": ["medico", "enfermeria", "recepcion", "caja"]},
+    {"name": "admins", "realmRoles": ["ti_admin"]}
+  ],
+  "clients": [
+    {
+      "clientId": "rizoma-web",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {"pkce.code.challenge.method": "S256"}
+    },
+    {
+      "clientId": "rizoma-api",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "rizoma_api_demo_secret"
+    }
+  ],
+  "users": [
+    {
+      "username": "admin.demo",
+      "enabled": true,
+      "email": "admin.demo@example.invalid",
+      "firstName": "Admin",
+      "lastName": "Demo",
+      "realmRoles": ["ti_admin"],
+      "groups": ["admins"],
+      "requiredActions": ["CONFIGURE_TOTP"],
+      "credentials": [{"type": "password", "value": "rizoma_demo_password", "temporary": false}]
+    },
+    {
+      "username": "medico.demo",
+      "enabled": true,
+      "email": "medico.demo@example.invalid",
+      "firstName": "Medico",
+      "lastName": "Demo",
+      "realmRoles": ["medico"],
+      "groups": ["salud"],
+      "requiredActions": ["CONFIGURE_TOTP"],
+      "credentials": [{"type": "password", "value": "rizoma_demo_password", "temporary": false}]
+    }
+  ]
+}

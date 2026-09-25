@@ -1,0 +1,178 @@
+# Local development stack for Rizoma (CRM maleable multivertical, Peru).
+#
+#   cp infra/docker/.env.example infra/docker/.env
+#   docker compose -f infra/docker/compose.yml --env-file infra/docker/.env up -d
+#   docker compose -f infra/docker/compose.yml config
+#
+# Scope: F0 foundation only. All credentials below are SYNTHETIC demo values for
+# local development. They are never valid for any shared or production
+# environment; real secrets live in the secret vault, never in this file.
+#
+# Ports are published on loopback only. Nothing outside this machine needs to
+# reach a local database, broker or object store that holds demo data.
+
+name: rizoma
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rizoma}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rizoma_demo_password}
+      POSTGRES_DB: ${POSTGRES_DB:-rizoma}
+      POSTGRES_INITDB_ARGS: ${POSTGRES_INITDB_ARGS:---encoding=UTF8 --locale=C}
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-rizoma} -d ${POSTGRES_DB:-rizoma}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - rizoma
+
+  # One-shot provisioning for the Keycloak schema database. Postgres creates
+  # only POSTGRES_DB on first start, so the Keycloak database is created here.
+  # It is idempotent and exits, which is why its restart policy is "no".
+  keycloak-db-init:
+    image: postgres:16
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-rizoma_demo_password}
+      POSTGRES_USER: ${POSTGRES_USER:-rizoma}
+      KEYCLOAK_DB: ${KEYCLOAK_DB:-keycloak}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        until pg_isready -h postgres -U "$$POSTGRES_USER" -d postgres; do sleep 1; done
+        psql -h postgres -U "$$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -tAc \
+          "SELECT 1 FROM pg_database WHERE datname = '$$KEYCLOAK_DB'" | grep -q 1 \
+          || psql -h postgres -U "$$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE \"$$KEYCLOAK_DB\""
+    networks:
+      - rizoma
+
+  # PgBouncer in transaction pooling mode. Required because the request contract
+  # uses SET LOCAL inside a transaction (bases-consolidadas-v1.md 4.2/7).
+  # NOTE: the edoburu/pgbouncer image listens on 5432 inside the container, so
+  # the host port (default 6432) maps to container 5432.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p2
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_USER: ${POSTGRES_USER:-rizoma}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-rizoma_demo_password}
+      DB_NAME: ${POSTGRES_DB:-rizoma}
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-200}
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
+      ADMIN_USERS: ${POSTGRES_USER:-rizoma}
+    ports:
+      - '127.0.0.1:${PGBOUNCER_PORT:-6432}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-rizoma}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - rizoma
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD:-rizoma_demo_password}']
+    ports:
+      - '127.0.0.1:${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a ${REDIS_PASSWORD:-rizoma_demo_password} ping | grep PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - rizoma
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    command: ['start-dev', '--http-port=8080', '--import-realm']
+    depends_on:
+      keycloak-db-init:
+        condition: service_completed_successfully
+    environment:
+      # Bootstrap admin from variables. Keycloak 26+ uses KC_BOOTSTRAP_ADMIN_*.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-rizoma_demo_password}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB:-keycloak}
+      KC_DB_USERNAME: ${POSTGRES_USER:-rizoma}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-rizoma_demo_password}
+      KC_HEALTH_ENABLED: 'true'
+      KC_HTTP_ENABLED: 'true'
+      KC_HTTP_MANAGEMENT_PORT: ${KEYCLOAK_MANAGEMENT_PORT:-9000}
+    volumes:
+      - ../keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - '127.0.0.1:${KEYCLOAK_PORT:-8080}:8080'
+      - '127.0.0.1:${KEYCLOAK_MANAGEMENT_PORT:-9000}:9000'
+    healthcheck:
+      test: ['CMD-SHELL', 'exec 3<>/dev/tcp/127.0.0.1/${KEYCLOAK_MANAGEMENT_PORT:-9000} && echo -e "GET /health/ready HTTP/1.1\r\nHost: localhost\r\n\r\n" >&3 && head -n 1 <&3 | grep -q "200"']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    networks:
+      - rizoma
+
+  # S3-compatible object storage for local development (LocalStack S3).
+  # NOTE (2026-09): upstream MinIO removed its public Docker Hub repos and now
+  # requires authenticated pulls, so local dev uses LocalStack S3 instead.
+  # Production still targets any S3-compatible backend (R2/MinIO/AWS) via the
+  # same SDK + presigned-URL contract (bases-consolidadas-v1.md 4.5).
+  s3:
+    image: localstack/localstack:4
+    restart: unless-stopped
+    environment:
+      SERVICES: s3
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-rizoma}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-rizoma_demo_password}
+      AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+    ports:
+      - '127.0.0.1:${S3_PORT:-4566}:4566'
+    volumes:
+      - s3data:/var/lib/localstack
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:4566/_localstack/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - rizoma
+
+volumes:
+  pgdata:
+  redisdata:
+  s3data:
+
+networks:
+  rizoma:
+    driver: bridge

@@ -1,0 +1,91 @@
+# Rizoma CI base (F0). Two jobs, no secrets.
+#
+# - compose-config: validates the local Docker Compose stack without starting it.
+# - skeleton: installs the npm workspaces and runs the placeholder scripts.
+#
+# Assumes this directory is the repository root (proyectos/rizoma).
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'feature/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-config:
+    name: Compose config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate compose file
+        run: docker compose -f infra/docker/compose.yml config
+
+  skeleton:
+    name: Monorepo skeleton
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install workspaces
+        run: npm install
+
+      - name: Typecheck placeholders
+        run: npm run typecheck
+
+  rls-lint:
+    name: RLS migration lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint migrations for tenant_id + policy
+        run: bash db/lint/rls_lint.sh db/migrations/*.sql
+
+  tenant-isolation:
+    name: Two-tenant isolation test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply foundation migration
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE rizoma_ci;' && psql -h localhost -U postgres -d rizoma_ci -v ON_ERROR_STOP=1 -f db/migrations/001_core_foundation.sql
+
+      - name: Run isolation test
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d rizoma_ci -v ON_ERROR_STOP=1 -f db/tests/tenant_isolation.sql

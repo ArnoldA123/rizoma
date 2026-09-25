@@ -1,0 +1,20 @@
+{
+  "name": "@rizoma/workers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rizoma BullMQ workers — outbox dispatch and provider/fiscal adapters (only workers call adapters).",
+  "engines": {
+    "node": ">=22.0.0 <23.0.0"
+  },
+  "scripts": {
+    "dev": "echo \"[workers] dev — no runtime entrypoint yet; queues/adapter are pure config\"",
+    "build": "echo \"[workers] build — nothing to compile (node --test strips types)\"",
+    "lint": "echo \"[workers] lint\"",
+    "typecheck": "echo \"[workers] typecheck\"",
+    "test": "node --test src/fiscal/adapter.test.ts"
+  },
+  "dependencies": {
+    "bullmq": "^5.34.0",
+    "ioredis": "^5.4.1"
+  }
+}

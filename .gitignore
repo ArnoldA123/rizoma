@@ -1,0 +1,14 @@
+# Local Pi runtime state
+.atl/
+
+# Node
+node_modules/
+# Local env (real secrets never committed)
+.env
+infra/docker/.env
+
+# Build output
+dist/
+.next/
+*.tsbuildinfo
+coverage/
