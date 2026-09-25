@@ -18,7 +18,16 @@ import { DEV_IDENTITY } from '@/lib/config';
 import { formatPen } from '@/lib/format';
 import { boardRoleLabel } from '@/lib/labels';
 import { getSaludBoard } from '@/lib/salud-api';
-import { boardCacheKey, readBoardCache, writeBoardCache } from '@/lib/salud-board-cache';
+import {
+  boardCacheKey,
+  downloadSaludBoardCsv,
+  fetchComparedSaludBoard,
+  readBoardCache,
+  writeBoardCache,
+  type BoardCompareMode,
+  type ComparedSaludBoard,
+} from '@/lib/salud-board-cache';
+import { saveTextFile } from '@/lib/salud-download';
 import {
   currentUtcDate,
   formatElapsed,
@@ -60,6 +69,9 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
   const [orgNodeId, setOrgNodeId] = useState(DEV_IDENTITY.orgNodeId);
   const [date, setDate] = useState(() => currentUtcDate());
   const [pollMs, setPollMs] = useState(BOARD_POLL_DEFAULT_MS);
+  const [compare, setCompare] = useState<BoardCompareMode>('off');
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const org = orgNodeId.trim();
@@ -75,6 +87,18 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
 
   const reloadSilently = board.reloadSilently;
   const data = board.data;
+
+  // Day-vs-−7d comparison (`GET ...?compare=previous-week`). The hook always
+  // runs, so `off` resolves to `null` without a request; any other mode
+  // reads fresh, outside the one-minute board cache.
+  const compareKey = `compare|${cacheKey}|${compare}`;
+  const compared = useResource<ComparedSaludBoard | null>(compareKey, (signal) =>
+    compare === 'off'
+      ? Promise.resolve(null)
+      : fetchComparedSaludBoard(role, { date, ...(org === '' ? {} : { org }) }, signal),
+  );
+  const delta = compared.data?.delta ?? null;
+  const previousDate = compared.data?.previous.date ?? null;
 
   // A board is only rendered when it belongs to the key on screen: either the
   // answer for that key, or a cached board the hook seeded for it. Otherwise the
@@ -110,6 +134,19 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
   }, []);
 
   const setPollPeriod = useCallback((value: number) => setPollMs(clampBoardPollMs(value)), []);
+
+  const downloadCsv = useCallback(async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const file = await downloadSaludBoardCsv(role, { date, ...(org === '' ? {} : { org }) });
+      saveTextFile(file.filename, file.csv);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : 'No se pudo descargar el CSV.');
+    } finally {
+      setDownloading(false);
+    }
+  }, [role, org, date]);
 
   return (
     <div className={cn('flex flex-col gap-6', className)}>
@@ -202,6 +239,48 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
               Actualizar
             </Button>
           </div>
+
+          {/* Comparison and export: the drift reads `?compare=previous-week`
+              (day vs −7d) and the CSV carries the same aggregate as the JSON
+              board. The active mode is exposed as a pressed state. */}
+          <div
+            role="group"
+            aria-label="Comparativa y descarga"
+            className="flex flex-wrap items-center gap-2 border-t border-border pt-4"
+          >
+            <span className="text-xs text-muted-foreground">Comparativa:</span>
+            {[
+              { label: 'Sin comparativa', value: 'off' as BoardCompareMode },
+              { label: 'Semana anterior (−7 d)', value: 'previous-week' as BoardCompareMode },
+            ].map((option) => (
+              <Button
+                key={option.value}
+                variant={compare === option.value ? 'outline' : 'ghost'}
+                size="sm"
+                aria-pressed={compare === option.value}
+                onClick={() => setCompare(option.value)}
+              >
+                {option.label}
+              </Button>
+            ))}
+            <Button variant="outline" size="sm" onClick={downloadCsv} disabled={downloading}>
+              {downloading ? 'Descargando…' : 'Descargar CSV'}
+            </Button>
+            {compare !== 'off' && compared.loading ? (
+              <span className="text-xs text-muted-foreground">leyendo comparativa…</span>
+            ) : null}
+          </div>
+
+          {compared.failure !== null && compare !== 'off' ? (
+            <p role="alert" className="text-xs text-destructive">
+              No se pudo leer la comparativa: {compared.failure.message}
+            </p>
+          ) : null}
+          {downloadError !== null ? (
+            <p role="alert" className="text-xs text-destructive">
+              No se pudo descargar el CSV: {downloadError}
+            </p>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -215,20 +294,43 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
 
       {board.loading && visibleBoard === null ? <BoardSkeleton /> : null}
 
-      {visibleBoard === null ? null : <BoardKpis board={visibleBoard} />}
+      {visibleBoard === null ? null : (
+        <BoardKpis board={visibleBoard} delta={delta} previousDate={previousDate} />
+      )}
     </div>
   );
 }
 
+/** Drift of one KPI (`current − previous`), or `undefined` when not comparing. */
+function deltaText(
+  delta: Readonly<Record<string, number>> | null,
+  key: string,
+  previousDate: string | null,
+): string | undefined {
+  if (delta === null || previousDate === null) return undefined;
+  const value = delta[key];
+  if (value === undefined) return undefined;
+  const signed = value > 0 ? `+${value}` : String(value);
+  return `${signed} vs ${previousDate}`;
+}
+
 /** KPI grid of the board, switched by role — the discriminated union of §6.3. */
-function BoardKpis({ board }: { readonly board: SaludDashboardBoard }) {
+function BoardKpis({
+  board,
+  delta,
+  previousDate,
+}: {
+  readonly board: SaludDashboardBoard;
+  readonly delta: Readonly<Record<string, number>> | null;
+  readonly previousDate: string | null;
+}) {
   if (board.role === 'caja') {
     return (
       <div className="flex flex-col gap-4">
         <div className="grid gap-4 sm:grid-cols-3">
-          <Kpi label="Cobrado hoy" value={formatPen(board.todayCollected)} hint="Cobros registrados del día" />
-          <Kpi label="Comprobantes emitidos" value={String(board.invoicesIssued)} hint="Del día en la sede" />
-          <Kpi label="Pendientes fiscales" value={String(board.fiscalPending)} hint="Emitidos sin aceptar" />
+          <Kpi label="Cobrado hoy" value={formatPen(board.todayCollected)} hint="Cobros registrados del día" delta={deltaText(delta, 'todayCollected', previousDate)} />
+          <Kpi label="Comprobantes emitidos" value={String(board.invoicesIssued)} hint="Del día en la sede" delta={deltaText(delta, 'invoicesIssued', previousDate)} />
+          <Kpi label="Pendientes fiscales" value={String(board.fiscalPending)} hint="Emitidos sin aceptar" delta={deltaText(delta, 'fiscalPending', previousDate)} />
         </div>
         <Card tone="tinted">
           <CardHeader>
@@ -267,9 +369,9 @@ function BoardKpis({ board }: { readonly board: SaludDashboardBoard }) {
     return (
       <div className="flex flex-col gap-4">
         <div className="grid gap-4 sm:grid-cols-3">
-          <Kpi label="Mis citas de hoy" value={String(board.myAppointments)} hint="Solo las propias" />
-          <Kpi label="Episodios abiertos" value={String(board.openEpisodes)} hint="A mi nombre" />
-          <Kpi label="Consentimientos pendientes" value={String(board.pendingConsents)} hint="Por firmar" />
+          <Kpi label="Mis citas de hoy" value={String(board.myAppointments)} hint="Solo las propias" delta={deltaText(delta, 'myAppointments', previousDate)} />
+          <Kpi label="Episodios abiertos" value={String(board.openEpisodes)} hint="A mi nombre" delta={deltaText(delta, 'openEpisodes', previousDate)} />
+          <Kpi label="Consentimientos pendientes" value={String(board.pendingConsents)} hint="Por firmar" delta={deltaText(delta, 'pendingConsents', previousDate)} />
         </div>
         <p className="text-xs text-muted-foreground">
           Este contrato declara conteos y ningún importe: el tablero clínico no transporta cobros.
@@ -281,10 +383,10 @@ function BoardKpis({ board }: { readonly board: SaludDashboardBoard }) {
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-4 sm:grid-cols-4">
-        <Kpi label="Citas de hoy" value={String(board.todayAppointments)} hint="En la sede" />
-        <Kpi label="Espera promedio" value={`${board.waitingAvgMin} min`} hint="Con un decimal" />
-        <Kpi label="Inasistencias" value={String(board.noShows)} hint="No asistió" />
-        <Kpi label="Cola" value={String(board.queue)} hint="En espera" />
+        <Kpi label="Citas de hoy" value={String(board.todayAppointments)} hint="En la sede" delta={deltaText(delta, 'todayAppointments', previousDate)} />
+        <Kpi label="Espera promedio" value={`${board.waitingAvgMin} min`} hint="Con un decimal" delta={deltaText(delta, 'waitingAvgMin', previousDate)} />
+        <Kpi label="Inasistencias" value={String(board.noShows)} hint="No asistió" delta={deltaText(delta, 'noShows', previousDate)} />
+        <Kpi label="Cola" value={String(board.queue)} hint="En espera" delta={deltaText(delta, 'queue', previousDate)} />
       </div>
       <p className="text-xs text-muted-foreground">
         Conteos de recepción: ni importes ni contenido clínico. El tablero de caja y el clínico son
@@ -298,10 +400,12 @@ function Kpi({
   label,
   value,
   hint,
+  delta,
 }: {
   readonly label: string;
   readonly value: string;
   readonly hint: string;
+  readonly delta?: string;
 }) {
   return (
     <Card>
@@ -311,6 +415,9 @@ function Kpi({
           {value}
         </CardTitle>
         <CardDescription>{hint}</CardDescription>
+        {delta === undefined ? null : (
+          <p className="tabular text-xs text-muted-foreground">{delta}</p>
+        )}
       </CardHeader>
     </Card>
   );

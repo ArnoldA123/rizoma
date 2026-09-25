@@ -15,10 +15,15 @@ import { FailurePanel } from '@/components/ui/states';
 import { formatQuantity } from '@/lib/format';
 import { getCompanyBoard } from '@/lib/obras-api';
 import {
+  downloadCompanyBoardCsv,
+  fetchComparedCompanyBoard,
   lastCompanyBoardScope,
   readCompanyBoardCache,
   writeCompanyBoardCache,
+  type ComparedCompanyBoard,
+  type ObrasBoardCompareMode,
 } from '@/lib/obras-board-cache';
+import { saveTextFile } from '@/lib/salud-download';
 import { formatElapsed, formatUtcDateLong } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
@@ -39,6 +44,9 @@ import { cn } from '@/lib/utils';
  */
 export function CompanyBoardPanel({ className }: { readonly className?: string }) {
   const [pollMs, setPollMs] = useState(OBRAS_BOARD_POLL_DEFAULT_MS);
+  const [compare, setCompare] = useState<ObrasBoardCompareMode>('off');
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   // The endpoint takes no parameter, so the resource key is a constant: the
@@ -61,6 +69,18 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
 
   // One endpoint, one identity: the answer always belongs to the key on screen.
   const visibleBoard = data;
+
+  // Comparison (`GET /v1/obras/board?compare=previous-week`). `off` resolves
+  // to `null` without a request; the company KPIs are scope-state, not
+  // day-state, so the drift reads 0 within one request — the envelope still
+  // carries the labeled previous date for external BI series.
+  const compared = useResource<ComparedCompanyBoard | null>(
+    `obras-company-compare|${compare}`,
+    (signal) =>
+      compare === 'off' ? Promise.resolve(null) : fetchComparedCompanyBoard(signal),
+  );
+  const delta = compared.data?.delta ?? null;
+  const previousDate = compared.data?.previous.date ?? null;
 
   useEffect(() => {
     // Storing the echoed identity is what makes the cache useful on the next
@@ -88,6 +108,19 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
   }, []);
 
   const setPollPeriod = useCallback((value: number) => setPollMs(clampObrasBoardPollMs(value)), []);
+
+  const downloadCsv = useCallback(async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const file = await downloadCompanyBoardCsv();
+      saveTextFile(file.filename, file.csv);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : 'No se pudo descargar el CSV.');
+    } finally {
+      setDownloading(false);
+    }
+  }, []);
 
   return (
     <Card className={className} id="tablero-empresa">
@@ -133,6 +166,43 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
           </Button>
         </div>
 
+        {/* Comparison and export: the drift reads `?compare=previous-week` and
+            the CSV carries the same aggregate as the JSON board. */}
+        <div role="group" aria-label="Comparativa y descarga" className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">Comparativa:</span>
+          {[
+            { label: 'Sin comparativa', value: 'off' as ObrasBoardCompareMode },
+            { label: 'Semana anterior (−7 d)', value: 'previous-week' as ObrasBoardCompareMode },
+          ].map((option) => (
+            <Button
+              key={option.value}
+              variant={compare === option.value ? 'outline' : 'ghost'}
+              size="sm"
+              aria-pressed={compare === option.value}
+              onClick={() => setCompare(option.value)}
+            >
+              {option.label}
+            </Button>
+          ))}
+          <Button variant="outline" size="sm" onClick={downloadCsv} disabled={downloading}>
+            {downloading ? 'Descargando…' : 'Descargar CSV'}
+          </Button>
+          {compare !== 'off' && compared.loading ? (
+            <span className="text-xs text-muted-foreground">leyendo comparativa…</span>
+          ) : null}
+        </div>
+
+        {compared.failure !== null && compare !== 'off' ? (
+          <p role="alert" className="text-xs text-destructive">
+            No se pudo leer la comparativa: {compared.failure.message}
+          </p>
+        ) : null}
+        {downloadError !== null ? (
+          <p role="alert" className="text-xs text-destructive">
+            No se pudo descargar el CSV: {downloadError}
+          </p>
+        ) : null}
+
         {board.failure !== null ? (
           <FailurePanel
             title="No se pudo leer el tablero de empresa"
@@ -150,18 +220,25 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
             </p>
 
             <div className="grid gap-4 sm:grid-cols-4">
-              <Kpi label="Obras en el alcance" value={String(visibleBoard.sites.total)} />
-              <Kpi label="En ejecución" value={String(visibleBoard.sites.active)} />
-              <Kpi label="Planificadas" value={String(visibleBoard.sites.planned)} />
-              <Kpi label="Cerradas" value={String(visibleBoard.sites.closed)} />
+              <Kpi label="Obras en el alcance" value={String(visibleBoard.sites.total)} delta={deltaText(delta, 'sitesTotal', previousDate)} />
+              <Kpi label="En ejecución" value={String(visibleBoard.sites.active)} delta={deltaText(delta, 'sitesActive', previousDate)} />
+              <Kpi label="Planificadas" value={String(visibleBoard.sites.planned)} delta={deltaText(delta, 'sitesPlanned', previousDate)} />
+              <Kpi label="Cerradas" value={String(visibleBoard.sites.closed)} delta={deltaText(delta, 'sitesClosed', previousDate)} />
             </div>
 
             <div className="grid gap-4 sm:grid-cols-4">
-              <Kpi label="Cantidad prevista" value={formatQuantity(visibleBoard.progress.qtyPlanned)} />
-              <Kpi label="Cantidad ejecutada" value={formatQuantity(visibleBoard.progress.qtyDone)} />
-              <Kpi label="Cantidad restante" value={formatQuantity(visibleBoard.progress.qtyRemaining)} />
-              <Kpi label="Avance agregado" value={`${visibleBoard.progress.percent} %`} />
+              <Kpi label="Cantidad prevista" value={formatQuantity(visibleBoard.progress.qtyPlanned)} delta={deltaText(delta, 'qtyPlanned', previousDate)} />
+              <Kpi label="Cantidad ejecutada" value={formatQuantity(visibleBoard.progress.qtyDone)} delta={deltaText(delta, 'qtyDone', previousDate)} />
+              <Kpi label="Cantidad restante" value={formatQuantity(visibleBoard.progress.qtyRemaining)} delta={deltaText(delta, 'qtyRemaining', previousDate)} />
+              <Kpi label="Avance agregado" value={`${visibleBoard.progress.percent} %`} delta={deltaText(delta, 'percent', previousDate)} />
             </div>
+            {compare !== 'off' && previousDate !== null ? (
+              <p className="text-xs text-muted-foreground">
+                Comparado con el {formatUtcDateLong(previousDate)}: los KPI de empresa agregan el
+                estado del alcance, no un día, así que la deriva dentro de una lectura es 0 por
+                construcción; la fecha anterior rotula la serie para BI externo.
+              </p>
+            ) : null}
 
             <section className="flex flex-col gap-2 border-t border-border pt-4">
               <h3 className="text-[0.8125rem] font-medium">KPI no aplicables</h3>
@@ -183,13 +260,29 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
   );
 }
 
-function Kpi({ label, value }: { readonly label: string; readonly value: string }) {
+function Kpi({ label, value, delta }: { readonly label: string; readonly value: string; readonly delta?: string }) {
   return (
     <div className={cn('rounded-md border border-border bg-card px-3 py-2.5')}>
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="tabular text-lg font-medium">{value}</p>
+      {delta === undefined ? null : (
+        <p className="tabular text-xs text-muted-foreground">{delta}</p>
+      )}
     </div>
   );
+}
+
+/** Drift of one KPI (`current − previous`), or `undefined` when not comparing. */
+function deltaText(
+  delta: Readonly<Record<string, number>> | null,
+  key: string,
+  previousDate: string | null,
+): string | undefined {
+  if (delta === null || previousDate === null) return undefined;
+  const value = delta[key];
+  if (value === undefined) return undefined;
+  const signed = value > 0 ? `+${value}` : String(value);
+  return `${signed} vs ${previousDate}`;
 }
 
 function CompanySkeleton() {

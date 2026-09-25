@@ -52,6 +52,20 @@ export const BOARD_LIST_LIMIT = 200;
 /** Upcoming milestones the site board shows at most. */
 export const UPCOMING_MILESTONE_LIMIT = 20;
 
+/** Days a `previous-week` comparison looks back: the board day vs −7d. */
+export const BOARD_COMPARE_DAYS = 7;
+
+/** `?compare=` modes. The previous-week snapshot is the only one in MVP1. */
+export const BOARD_COMPARE_MODES = ['previous-week'] as const;
+export type BoardCompareMode = (typeof BOARD_COMPARE_MODES)[number];
+
+/** `.../export?format=` values. CSV is the only BI export in MVP1. */
+export const BOARD_EXPORT_FORMATS = ['csv'] as const;
+export type BoardExportFormat = (typeof BOARD_EXPORT_FORMATS)[number];
+
+/** Content type of every board export. */
+export const BOARD_EXPORT_CONTENT_TYPE = 'text/csv; charset=utf-8';
+
 /** Horizon of «hitos próximos»: overdue plus the next 30 days. */
 export const UPCOMING_MILESTONE_HORIZON_DAYS = 30;
 
@@ -107,6 +121,18 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
+/** Two decimals keep quantity fractions in a delta; counts stay exact. */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/** Moves a `YYYY-MM-DD` day by whole days, staying in UTC. */
+function shiftIsoDate(date: string, days: number): string {
+  const base = new Date(`${date}T00:00:00.000Z`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
+}
+
 /** `done / planned` as a percentage; a zero plan reports 0, not NaN/Infinity. */
 function percentOf(done: number, planned: number): number {
   if (planned <= 0) return 0;
@@ -141,6 +167,26 @@ function parseDate(raw: string | undefined, traceId: string): string {
     throw badRequest('date must be a real YYYY-MM-DD date', traceId);
   }
   return value;
+}
+
+function parseCompare(raw: string | undefined, traceId: string): BoardCompareMode {
+  const value = raw?.trim() ?? '';
+  if (value === '') return 'previous-week';
+  if (!(BOARD_COMPARE_MODES as readonly string[]).includes(value)) {
+    throw badRequest(`Unknown compare mode (expected ${BOARD_COMPARE_MODES.join('|')}): ${value}`, traceId);
+  }
+  return value as BoardCompareMode;
+}
+
+function parseExportFormat(raw: string | undefined, traceId: string): BoardExportFormat {
+  const value = raw?.trim() ?? '';
+  if (!(BOARD_EXPORT_FORMATS as readonly string[]).includes(value)) {
+    throw badRequest(
+      `Unknown export format (expected ${BOARD_EXPORT_FORMATS.join('|')}): ${value === '' ? '(missing)' : value}`,
+      traceId,
+    );
+  }
+  return value as BoardExportFormat;
 }
 
 // ============ guard facts ============
@@ -388,6 +434,39 @@ JOIN sites s ON s.id = p.site_id AND s.tenant_id = p.tenant_id
 WHERE p.tenant_id = $1 AND s.org_node_id = ANY($2::uuid[]) AND p.status = 'posted'
 LIMIT 1`;
 
+/**
+ * Day-over-day comparison of one site board: the board of `date` next to the
+ * board of `date − 7d`, plus the drift of the date-filtered KPI (attendance).
+ *
+ * Both legs run the same parametrized SQL; only the date changes. Progress,
+ * critical stock, maintenance assets and upcoming milestones are scope-state
+ * reads, identical in both legs by construction, so they carry no delta.
+ */
+export interface ComparedSiteBoard {
+  readonly current: SiteBoard;
+  readonly previous: SiteBoard;
+  readonly delta: Record<string, number>;
+}
+
+/**
+ * Comparison of the company board. The company KPIs are scope-state (sites in
+ * the membership subtree and their cumulative progress), not day-state, so
+ * both legs read the same snapshot and the drift is 0 by construction; the
+ * value of the envelope is the labeled previous date for external BI series.
+ */
+export interface ComparedCompanyBoard {
+  readonly current: CompanyBoard;
+  readonly previous: CompanyBoard;
+  readonly delta: Record<string, number>;
+}
+
+/** One BI export: a CSV of the board aggregate with its safe filename. */
+export interface BoardExport {
+  readonly filename: string;
+  readonly contentType: string;
+  readonly csv: string;
+}
+
 // ============ use cases ============
 
 function mapProgressLine(row: Record<string, unknown>): ProgressLineBoard {
@@ -432,21 +511,16 @@ function mapAttendance(rows: readonly Record<string, unknown>[], date: string): 
 }
 
 /**
- * Returns the board of one site for one day. Access follows
- * `requireSiteAccess` (central rule plus the construction key), so an
- * assignment-scoped worker sees its own site and a manager sees the sites its
- * subtree covers.
+ * Reads one site board for one day. The caller must already hold site access;
+ * this is the shared leg of `getSiteBoard`, `getComparedSiteBoard` and
+ * `exportSiteBoard`.
  */
-export async function getSiteBoard(
+async function readSiteBoard(
   actor: ObraActorContext,
-  siteId: string,
-  date?: string,
+  site: SiteRecord,
+  scope: readonly string[],
+  boardDate: string,
 ): Promise<SiteBoard> {
-  if (!UUID_RE.test(siteId?.trim() ?? '')) throw badRequest('Invalid site id', actor.traceId);
-  const boardDate = parseDate(date, actor.traceId);
-  const site: SiteRecord = await requireSiteAccess(actor, actor.userId, siteId.trim());
-  const scope = await loadScopeSubtree(actor.client, actor.tenantId, site.orgNodeId);
-
   const progress = await actor.client.query(PROGRESS_BY_LINE_SQL, [actor.tenantId, site.id]);
   const attendance = await actor.client.query(ATTENDANCE_STATUS_SQL, [
     actor.tenantId,
@@ -487,12 +561,158 @@ export async function getSiteBoard(
   };
 }
 
+/** Drift (`current − previous`) of the date-filtered site KPI: attendance. */
+function diffSiteBoards(current: SiteBoard, previous: SiteBoard): Record<string, number> {
+  return {
+    attendanceRegistered: round2(current.attendance.registered - previous.attendance.registered),
+    attendanceApproved: round2(current.attendance.approved - previous.attendance.approved),
+    attendanceRejected: round2(current.attendance.rejected - previous.attendance.rejected),
+    attendanceAdjusted: round2(current.attendance.adjusted - previous.attendance.adjusted),
+    attendanceTotal: round2(current.attendance.total - previous.attendance.total),
+  };
+}
+
+/** Drift (`current − previous`) of the company scope-state KPIs. */
+function diffCompanyBoards(current: CompanyBoard, previous: CompanyBoard): Record<string, number> {
+  return {
+    sitesTotal: round2(current.sites.total - previous.sites.total),
+    sitesActive: round2(current.sites.active - previous.sites.active),
+    sitesPlanned: round2(current.sites.planned - previous.sites.planned),
+    sitesClosed: round2(current.sites.closed - previous.sites.closed),
+    qtyPlanned: round2(current.progress.qtyPlanned - previous.progress.qtyPlanned),
+    qtyDone: round2(current.progress.qtyDone - previous.progress.qtyDone),
+    qtyRemaining: round2(current.progress.qtyRemaining - previous.progress.qtyRemaining),
+    percent: round2(current.progress.percent - previous.progress.percent),
+  };
+}
+
 /**
- * Returns the company board over the caller's scope. The KPIs aggregate every
- * site inside the membership subtree; `notApplicable` records the two §6.2
- * blocks that do not exist in MVP1 (cobranza, uso por módulo).
+ * Filename of a board export. The date comes from the calendar check, so it
+ * can only carry safe characters; operator-controlled text (the site code) is
+ * scrubbed to `[A-Za-z0-9._-]`, mirroring the strictness of the imports
+ * errors-CSV naming: never a separator, a control character or a leading dot.
  */
-export async function getCompanyBoard(actor: ObraActorContext): Promise<CompanyBoard> {
+function safeExportFilename(stem: string, fallback: string): string {
+  const scrubbed = stem.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^\.+/, '');
+  const candidate = scrubbed === '' ? fallback : `${scrubbed}.csv`;
+  if (/[\\/:*?"<>|\u0000-\u001f]/.test(candidate) || candidate.startsWith('.')) {
+    return fallback;
+  }
+  return candidate;
+}
+
+/** One CSV field: text, a number, or an empty cell. */
+type CsvCell = string | number | null;
+
+/** One CSV data row. */
+type CsvRow = readonly CsvCell[];
+
+/** One CSV cell: quoted only when it carries a comma, quote or line break. */
+function csvCell(value: string | number): string {
+  const text = typeof value === 'number' ? String(value) : value;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** Header plus rows, one trailing newline, no BOM: the BI-friendly shape. */
+function csvTable(header: readonly string[], rows: readonly CsvRow[]): string {
+  const lines = [
+    header.join(','),
+    ...rows.map((row) => row.map((cell) => (cell === null ? '' : csvCell(cell))).join(',')),
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * The site board as CSV: one row per budget line (the row-returning
+ * aggregate, already `LIMIT`-bounded) with the day attendance as context
+ * columns. A site with no budget lines still exports one row carrying the
+ * attendance, so the file is never header-only.
+ */
+function siteBoardToCsv(board: SiteBoard): string {
+  const header = ['site_id', 'site_code', 'org_node_id', 'date', 'budget_line_id', 'description', 'qty_planned', 'qty_done', 'qty_remaining', 'percent', 'attendance_registered', 'attendance_approved', 'attendance_rejected', 'attendance_adjusted', 'attendance_total'];
+  const attendance: readonly number[] = [board.attendance.registered, board.attendance.approved, board.attendance.rejected, board.attendance.adjusted, board.attendance.total];
+  const rows: CsvRow[] =
+    board.progress.length === 0
+      ? [[board.siteId, board.siteCode, board.orgNodeId, board.date, null, null, null, null, null, null, ...attendance]]
+      : board.progress.map((line) => [board.siteId, board.siteCode, board.orgNodeId, board.date, line.budgetLineId, line.description, line.qtyPlanned, line.qtyDone, line.qtyRemaining, line.percent, ...attendance]);
+  return csvTable(header, rows);
+}
+
+/** The company board as one CSV row (wide format, same numbers as the JSON). */
+function companyBoardToCsv(board: CompanyBoard): string {
+  return csvTable(
+    ['org_node_id', 'date', 'sites_total', 'sites_active', 'sites_planned', 'sites_closed', 'qty_planned', 'qty_done', 'qty_remaining', 'percent'],
+    [[board.orgNodeId, board.date, board.sites.total, board.sites.active, board.sites.planned, board.sites.closed, board.progress.qtyPlanned, board.progress.qtyDone, board.progress.qtyRemaining, board.progress.percent]],
+  );
+}
+/**
+ * Returns the board of one site for one day. Access follows
+ * `requireSiteAccess` (central rule plus the construction key), so an
+ * assignment-scoped worker sees its own site and a manager sees the sites its
+ * subtree covers.
+ */
+export async function getSiteBoard(
+  actor: ObraActorContext,
+  siteId: string,
+  date?: string,
+): Promise<SiteBoard> {
+  if (!UUID_RE.test(siteId?.trim() ?? '')) throw badRequest('Invalid site id', actor.traceId);
+  const boardDate = parseDate(date, actor.traceId);
+  const site: SiteRecord = await requireSiteAccess(actor, actor.userId, siteId.trim());
+  const scope = await loadScopeSubtree(actor.client, actor.tenantId, site.orgNodeId);
+  return readSiteBoard(actor, site, scope, boardDate);
+}
+
+/**
+ * Returns `{current, previous, delta}` for one site: the board of `date`
+ * next to the board of `date − 7d`, with the same parametrized SQL on both
+ * legs. Site access resolves once, so the comparison cannot widen what
+ * `getSiteBoard` allows.
+ */
+export async function getComparedSiteBoard(
+  actor: ObraActorContext,
+  siteId: string,
+  date?: string,
+  compare?: string,
+): Promise<ComparedSiteBoard> {
+  parseCompare(compare, actor.traceId);
+  if (!UUID_RE.test(siteId?.trim() ?? '')) throw badRequest('Invalid site id', actor.traceId);
+  const boardDate = parseDate(date, actor.traceId);
+  const site: SiteRecord = await requireSiteAccess(actor, actor.userId, siteId.trim());
+  const scope = await loadScopeSubtree(actor.client, actor.tenantId, site.orgNodeId);
+  const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
+  const current = await readSiteBoard(actor, site, scope, boardDate);
+  const previous = await readSiteBoard(actor, site, scope, previousDate);
+  return { current, previous, delta: diffSiteBoards(current, previous) };
+}
+
+/**
+ * Exports one site board as CSV (`GET .../board/export?format=csv`). Same
+ * aggregates and same `LIMIT` as the JSON board, progress-line grain with the
+ * day attendance as context columns.
+ */
+export async function exportSiteBoard(
+  actor: ObraActorContext,
+  siteId: string,
+  date?: string,
+  format?: string,
+): Promise<BoardExport> {
+  parseExportFormat(format, actor.traceId);
+  const board = await getSiteBoard(actor, siteId, date);
+  return {
+    filename: safeExportFilename(`tablero-obra-${board.siteCode}-${board.date}`, 'tablero-obra.csv'),
+    contentType: BOARD_EXPORT_CONTENT_TYPE,
+    csv: siteBoardToCsv(board),
+  };
+}
+
+/**
+ * Reads the company board over the caller's scope for one labeled day. The
+ * KPIs are scope-state (they aggregate the membership subtree), so the day is
+ * an echoed label for BI series, not a filter — the same rule the company
+ * `date` already followed before it became a parameter.
+ */
+async function readCompanyBoard(actor: ObraActorContext, boardDate: string): Promise<CompanyBoard> {
   const facts = await loadFacts(actor);
   const membership = await authorize(actor, facts, {
     entity: 'dashboard',
@@ -512,7 +732,7 @@ export async function getCompanyBoard(actor: ObraActorContext): Promise<CompanyB
 
   return {
     orgNodeId: membership.orgNodeId,
-    date: todayIsoDate(),
+    date: boardDate,
     sites: {
       total: toNumber(sitesRow.total),
       active: toNumber(sitesRow.active),
@@ -529,5 +749,51 @@ export async function getCompanyBoard(actor: ObraActorContext): Promise<CompanyB
       collections: 'not applicable: MVP1 Obras has no invoicing/collections (billing vertical)',
       moduleUsage: 'not applicable: MVP1 records no per-module usage metric',
     },
+  };
+}
+
+/**
+ * Returns the company board over the caller's scope. The KPIs aggregate every
+ * site inside the membership subtree; `notApplicable` records the two §6.2
+ * blocks that do not exist in MVP1 (cobranza, uso por módulo).
+ */
+export async function getCompanyBoard(actor: ObraActorContext, date?: string): Promise<CompanyBoard> {
+  return readCompanyBoard(actor, parseDate(date, actor.traceId));
+}
+
+/**
+ * Returns `{current, previous, delta}` for the company board: the scope-state
+ * snapshot labeled with `date` next to the one labeled `date − 7d`, same SQL
+ * on both legs. See {@link ComparedCompanyBoard} for why the drift reads 0
+ * within one request.
+ */
+export async function getComparedCompanyBoard(
+  actor: ObraActorContext,
+  date?: string,
+  compare?: string,
+): Promise<ComparedCompanyBoard> {
+  parseCompare(compare, actor.traceId);
+  const boardDate = parseDate(date, actor.traceId);
+  const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
+  const current = await readCompanyBoard(actor, boardDate);
+  const previous = await readCompanyBoard(actor, previousDate);
+  return { current, previous, delta: diffCompanyBoards(current, previous) };
+}
+
+/**
+ * Exports the company board as CSV (`GET .../board/export?format=csv`). Same
+ * aggregate as the JSON board, one row, wide format.
+ */
+export async function exportCompanyBoard(
+  actor: ObraActorContext,
+  date?: string,
+  format?: string,
+): Promise<BoardExport> {
+  parseExportFormat(format, actor.traceId);
+  const board = await getCompanyBoard(actor, date);
+  return {
+    filename: safeExportFilename(`tablero-empresa-${board.date}`, 'tablero-empresa.csv'),
+    contentType: BOARD_EXPORT_CONTENT_TYPE,
+    csv: companyBoardToCsv(board),
   };
 }

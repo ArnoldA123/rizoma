@@ -69,6 +69,24 @@ export const APP_ROUTES: readonly AppRoute[] = [
     stage: 'W1',
   },
   {
+    // Policy audit (B5). Open route (no actions) on purpose: the preview is a
+    // read-only projection of the matrix and the catalog, so any membership
+    // of the tenant may read it — the same rationale as the webhook/API-key
+    // management screens, which gate on belonging rather than on a vertical.
+    // `navHidden` on purpose, like `/onboarding`: an audit destination
+    // reachable by URL whose advertising would rewrite the pinned per-role
+    // nav lists in `test/access.test.ts` (outside this work unit's surfaces).
+    // To advertise it, drop `navHidden` and extend those pins.
+    path: '/politicas',
+    label: 'Políticas',
+    description: 'Matriz rol × acción y probador de políticas por estado.',
+    section: 'inicio',
+    skin: 'neutral',
+    requirements: requires('/politicas', [], 'all'),
+    stage: 'B5',
+    navHidden: true,
+  },
+  {
     // First-run setup wizard (H3). Open route (no actions) and `navHidden` on
     // purpose: the run happens before any tenant exists, so it is a setup
     // destination rather than a daily screen — and the pinned per-role nav
