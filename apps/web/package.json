@@ -1,6 +1,6 @@
 {
   "name": "@rizoma/web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Rizoma Next.js 15 web app — App Router, Tailwind v4, shadcn-style primitives, Keycloak OIDC session and tenant proxy.",
   "engines": {
