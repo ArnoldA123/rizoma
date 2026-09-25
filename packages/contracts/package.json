@@ -1,0 +1,34 @@
+{
+  "name": "@rizoma/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rizoma shared API/domain contracts — minimal Zod schemas mirroring the /v1 row shapes.",
+  "engines": {
+    "node": ">=22.0.0 <23.0.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "lint": "echo \"[contracts] lint — no linter configured; typecheck is the gate\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test src/contracts.test.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.9.3"
+  }
+}

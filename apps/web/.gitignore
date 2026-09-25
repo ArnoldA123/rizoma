@@ -1,0 +1,14 @@
+# Next.js build output
+.next/
+out/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Local environment
+.env.local
+.env*.local
+
+# `next-env.d.ts` is NOT ignored on purpose: it is authored in this repo so
+# `npm run typecheck` passes on a fresh checkout, before the first `next build`
+# has had a chance to generate it.

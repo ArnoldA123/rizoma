@@ -1,0 +1,128 @@
+// Proxy request shaping — pure functions shared by the proxy Route Handler.
+//
+// Why a proxy instead of CORS: `apps/api/src/main.ts` does not call
+// `enableCors`, and this work unit must not change the API. Routing every call
+// through a same-origin handler is the smaller, safer change — it also keeps
+// the bearer token inside an `HttpOnly` cookie, which a browser-side CORS call
+// never could.
+//
+// The shaping rules are here and not inline in the handler so they are unit
+// testable: path traversal must be refused, `/health` must stay outside the
+// `/v1` prefix (the API excludes it from the global prefix), and the
+// development identity headers must only ever be trusted when the feature is
+// explicitly enabled.
+import {
+  AUTHORIZATION_HEADER,
+  API_VERSION_PREFIX,
+  IDEMPOTENCY_KEY_HEADER,
+  SCOPES_HEADER,
+  TENANT_ID_HEADER,
+  TRACE_ID_HEADER,
+  USER_ID_HEADER,
+} from './config.ts';
+import { DEV_HEADERS_ENABLED } from './server-config.ts';
+
+/** Upstream paths that must stay outside the `/v1` global prefix. */
+const UNVERSIONED_PATHS: readonly string[] = ['health'];
+
+/**
+ * Validates the captured catch-all segments. Returns `null` when any segment
+ * could escape the upstream path (`..`, an empty segment, an embedded slash or
+ * backslash). Encoding happens here, once, for every caller.
+ */
+export function sanitizeProxyPath(segments: readonly string[]): string[] | null {
+  if (segments.length === 0) return null;
+  const safe: string[] = [];
+  for (const segment of segments) {
+    if (segment === '' || segment === '.' || segment === '..') return null;
+    if (segment.includes('/') || segment.includes('\\')) return null;
+    safe.push(encodeURIComponent(segment));
+  }
+  return safe;
+}
+
+/**
+ * Upstream path (without origin) for the captured segments. `/health` is the
+ * only unversioned route; everything else is prefixed with `/v1`.
+ */
+export function resolveUpstreamPath(segments: readonly string[]): string | null {
+  const safe = sanitizeProxyPath(segments);
+  if (safe === null) return null;
+  if (safe.length === 1 && UNVERSIONED_PATHS.includes(safe[0] as string)) {
+    return `/${safe[0]}`;
+  }
+  return `${API_VERSION_PREFIX}/${safe.join('/')}`;
+}
+
+/** Header inputs the handler has already resolved from the request. */
+export interface UpstreamHeaderInput {
+  /** Verified, unexpired access token, when the session provided one. */
+  readonly accessToken?: string | null;
+  /** Development identity headers, only used when no token is present. */
+  readonly devIdentity?: {
+    readonly tenantId?: string | null;
+    readonly userId?: string | null;
+    readonly scopes?: string | null;
+  };
+  readonly idempotencyKey?: string | null;
+  readonly traceId: string;
+  readonly accept?: string | null;
+  readonly contentType?: string | null;
+}
+
+function setIfPresent(headers: Headers, name: string, value: string | null | undefined): void {
+  if (value === undefined || value === null || value === '') return;
+  headers.set(name, value);
+}
+
+/**
+ * Builds the upstream header set.
+ *
+ * Precedence is the security contract: a presented token always wins. The
+ * local `x-tenant-id` / `x-user-id` / `x-scopes` headers are forwarded only
+ * when there is no token AND the fallback is enabled for this environment, so
+ * a browser can never pick its own tenant in production.
+ */
+export function buildUpstreamHeaders(input: UpstreamHeaderInput): Headers {
+  const headers = new Headers();
+  setIfPresent(headers, 'accept', input.accept ?? 'application/json');
+  setIfPresent(headers, 'content-type', input.contentType);
+  setIfPresent(headers, TRACE_ID_HEADER, input.traceId);
+  setIfPresent(headers, IDEMPOTENCY_KEY_HEADER, input.idempotencyKey);
+
+  const token = input.accessToken ?? null;
+  if (token !== null && token !== '') {
+    headers.set(AUTHORIZATION_HEADER, `Bearer ${token}`);
+    return headers;
+  }
+
+  if (DEV_HEADERS_ENABLED && input.devIdentity !== undefined) {
+    setIfPresent(headers, TENANT_ID_HEADER, input.devIdentity.tenantId);
+    setIfPresent(headers, USER_ID_HEADER, input.devIdentity.userId);
+    setIfPresent(headers, SCOPES_HEADER, input.devIdentity.scopes);
+  }
+  return headers;
+}
+
+/** Response headers worth returning to the browser, and nothing else. */
+const FORWARDED_RESPONSE_HEADERS: readonly string[] = [
+  'content-type',
+  // CSV exports are streamed as attachments (W3/W5 downloads).
+  'content-disposition',
+];
+
+/** Copies the allowed upstream response headers onto the outgoing response. */
+export function copyResponseHeaders(upstream: Headers, outgoing: Headers, traceId: string): void {
+  for (const name of FORWARDED_RESPONSE_HEADERS) {
+    const value = upstream.get(name);
+    if (value !== null) outgoing.set(name, value);
+  }
+  // Correlation id: the API echoes ours, so prefer it and fall back to ours.
+  outgoing.set(TRACE_ID_HEADER, upstream.get(TRACE_ID_HEADER) ?? traceId);
+  outgoing.set('cache-control', 'no-store');
+}
+
+/** Correlation id generated by the proxy when the client sent none. */
+export function newProxyTraceId(): string {
+  return `web-${crypto.randomUUID()}`;
+}

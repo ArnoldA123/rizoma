@@ -1,0 +1,209 @@
+@import 'tailwindcss';
+
+/* ============================================================================
+   Rizoma web — design tokens
+   ----------------------------------------------------------------------------
+   One neutral base, two derived skins. The base is a warm near-monochrome ramp
+   (ink on paper) with a hairline border and a single accent slot; `salud` and
+   `obras` override only the accent slot, never the ramp. That is what keeps the
+   two verticals recognisable without forking the design system.
+   Values follow the W1 design steer and are contrast-checked (see the ratios
+   next to each accent).
+   ========================================================================== */
+
+/* Base ramp — light. `--base-hover` is an inverted surface: it always pairs
+   with `--base-paper` as its foreground, in both themes. */
+:root {
+  color-scheme: light;
+
+  --base-ink: #161615; /* on paper: 17.3:1 (AAA) */
+  --base-paper: #fafaf8;
+  --base-card: #ffffff;
+  --base-line: #e9e6df;
+  --base-muted: #6e6c66; /* on paper: 5.3:1 (AA) */
+  --base-faint: #f2f0ea;
+  --base-hover: #2b2b29;
+  --base-focus: #161615;
+
+  /* Semantic extension of the neutral ramp. The steer fixes the neutral
+     tokens; a denial state has to be distinguishable from ordinary chrome, so
+     this pair is added rather than invented per page. */
+  --base-danger: #7a2e2e; /* on paper: 8.1:1 (AAA) */
+  --base-danger-faint: #f7ecec;
+
+  /* Skin slots. The neutral default is ink-on-paper; `[data-skin]` below
+     replaces only these three. */
+  --skin-accent: var(--base-ink);
+  --skin-accent-ink: var(--base-paper);
+  --skin-tint: var(--base-faint);
+
+  /* Decorative grid: measurable at low strength, never load-bearing. */
+  --grid-size: 32px;
+  --grid-strength: 60%;
+}
+
+/* Base ramp — dark, the same ramp inverted. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --base-ink: #faf9f5;
+  --base-paper: #141413;
+  --base-card: #1b1b1a;
+  --base-line: #2b2b29;
+  --base-muted: #a8a6a0; /* on paper: 7.4:1 (AAA) */
+  --base-faint: #222220;
+  --base-hover: #e3ddce;
+  --base-focus: #faf9f5;
+
+  --base-danger: #e8b4b4; /* on paper: 11.1:1 (AAA) */
+  --base-danger-faint: #241a1a;
+}
+
+/* Skin: salud — sober clinical teal-slate, restraint over saturation. */
+[data-skin='salud'] {
+  --skin-accent: #1f4e5f; /* on paper: 8.4:1 (AAA) */
+  --skin-accent-ink: #f7fbfc;
+  --skin-tint: #edf3f4;
+}
+
+[data-theme='dark'] [data-skin='salud'] {
+  --skin-accent: #93bcc9; /* on paper: 9.2:1 (AAA) */
+  --skin-accent-ink: #10181b;
+  --skin-tint: #1a2427;
+}
+
+/* Skin: obras — earth / safety accent, same restraint. */
+[data-skin='obras'] {
+  --skin-accent: #7a5320; /* on paper: 6.6:1 (AA/AAA-large) */
+  --skin-accent-ink: #fbf7f0;
+  --skin-tint: #f6f1e7;
+}
+
+[data-theme='dark'] [data-skin='obras'] {
+  --skin-accent: #d9b173; /* on paper: 10.4:1 (AAA) */
+  --skin-accent-ink: #1d160c;
+  --skin-tint: #241e16;
+}
+
+/* Tailwind theme bridge. `inline` is required: the utilities must emit
+   `var(--base-*)`, not the value, so a theme or skin switch repaints without
+   regenerating CSS. Names follow the shadcn/ui token convention, which is what
+   lets a component from the registry drop into this project unchanged. */
+@theme inline {
+  --color-background: var(--base-paper);
+  --color-foreground: var(--base-ink);
+  --color-card: var(--base-card);
+  --color-card-foreground: var(--base-ink);
+  --color-primary: var(--base-ink);
+  --color-primary-foreground: var(--base-paper);
+  --color-secondary: var(--base-faint);
+  --color-secondary-foreground: var(--base-ink);
+  --color-muted: var(--base-faint);
+  --color-muted-foreground: var(--base-muted);
+  --color-hover: var(--base-hover);
+  --color-on-hover: var(--base-paper);
+  --color-accent: var(--skin-accent);
+  --color-accent-foreground: var(--skin-accent-ink);
+  --color-accent-tint: var(--skin-tint);
+  --color-border: var(--base-line);
+  --color-input: var(--base-line);
+  --color-ring: var(--base-focus);
+  --color-danger: var(--base-danger);
+  --color-danger-tint: var(--base-danger-faint);
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* The `dark:` variant follows the explicit attribute (the user's toggle), never
+   the media query — the media query only seeds the attribute once. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+@layer base {
+  * {
+    border-color: var(--base-line);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--base-paper);
+    color: var(--base-ink);
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* One focus treatment for the whole app: the token, never the browser
+     default, so keyboard navigation is visible on every surface. */
+  :focus-visible {
+    outline: 2px solid var(--base-focus);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background-color: var(--skin-accent);
+    color: var(--skin-accent-ink);
+  }
+
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.011em;
+    text-wrap: balance;
+  }
+
+  /* Money, dates and identifiers line up across rows. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum';
+  }
+}
+
+/* Decorative grid, drawn from the border token at low strength so it inherits
+   both themes without a second asset. It sits behind content and is masked at
+   the edges, so it never competes with text contrast. Toggle: `data-grid`. */
+@utility bg-grid {
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--base-line) var(--grid-strength), transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--base-line) var(--grid-strength), transparent) 1px,
+      transparent 1px
+    );
+  background-size: var(--grid-size) var(--grid-size);
+  background-position: -1px -1px;
+}
+
+@utility bg-grid-fade {
+  mask-image: radial-gradient(130% 85% at 50% 0%, rgb(0 0 0) 30%, transparent 100%);
+}
+
+[data-grid='off'] .bg-grid {
+  background-image: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
