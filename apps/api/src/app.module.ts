@@ -50,6 +50,18 @@
 // and decorator-only — the plain `files/files.service.ts` owns validation,
 // the guard, the canonical key (`files/paths.ts`), the manual SigV4 presigner
 // (`files/s3.ts`, no AWS SDK) and the write audit, following the same split.
+// A14 (W1) mounts the API key management endpoints: `auth/api-keys.controller.ts`
+// is thin and decorator-only — the plain `auth/api-keys.ts` owns validation,
+// the tenant-admin gate, the digest-only secret handling and the write audit,
+// following the same split. Verification itself lives in the `X-Api-Key`
+// branch of `TenantContextMiddleware`, before Bearer.
+// A15 (MVP2 W2) mounts the webhook endpoints: `webhooks/webhooks.controller.ts`
+// is thin and decorator-only — the plain `webhooks/webhooks.ts` owns
+// validation, the tenant-admin gate, the digest-only signing secrets, the
+// read-only delivery observability and the outbox writer
+// (`enqueueInvoiceWebhooks`, called inside the emitter transaction). Delivery
+// itself belongs to the workers (`webhook-deliver.ts`), so the API never
+// moves a delivery row.
 //
 // Only the JWT verifier needs a provider: the guard is a pure function over
 // facts the endpoint owns (identity, membership, entity, module), so there is
@@ -74,6 +86,8 @@ import {
   type MiddlewareConsumer,
   type NestModule,
 } from '@nestjs/common';
+import { ApiKeysController } from './auth/api-keys.controller.ts';
+import { WebhooksController } from './webhooks/webhooks.controller.ts';
 import {
   AUTH_JWT_VERIFIER,
   createKeycloakVerifier,
@@ -122,6 +136,8 @@ import {
     PrescriptionsController,
     BillingController,
     FilesController,
+    ApiKeysController,
+    WebhooksController,
     ImportsController,
     DashboardsController,
     SitesController,
