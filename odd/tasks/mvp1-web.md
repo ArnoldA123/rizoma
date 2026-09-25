@@ -80,7 +80,14 @@ Pieles: salud y obras derivan de la base neutra solo con acento propio (ej. salu
 
 ## Cierre
 
-Feature MVP1 Web 7/7 cerrada 2026-09-25. Sin commits por regla + git sin inicializar en proyecto. Deuda honesta: transiciones de cita, búsquedas, archivos firmados, onboarding HTTP, listas GET (facturas/equipos/stock) → ledgers locales, fotos como metadata. Siguiente propuesta: MVP2 (API pública + webhooks + billing por uso) o endurecer despliegue local (compose up + Keycloak realm + seeds + probes vivas).
+Feature MVP1 Web 7/7 cerrada 2026-09-25. Deuda honesta: transiciones de cita, búsquedas, archivos firmados, onboarding HTTP, listas GET (facturas/equipos/stock) → ledgers locales, fotos como metadata. Siguiente propuesta: MVP2 (API pública + webhooks + billing por uso) o endurecer despliegue local (compose up + Keycloak realm + seeds + probes vivas).
+
+## Entrega (repo privado ArnoldA123/rizoma, rama main)
+
+- `df14e9b` chore base backend (93 archivos) en `main`
+- `58a203e` feat web W1-W6+W2F (137 archivos) vía PR #1 `feature/mvp1-web` → `main`, merge `ac6c01f` (rama eliminada)
+- 2 commits honestos en vez de 7 retroactivos (archivos solapados entre tareas; evidencia por tarea en este doc + Engram #33/#34/#40)
+- Árbol limpio post-merge; `.gitignore` ampliado (`.next/`, `*.tsbuildinfo`) antes del commit 1
 
 ## Siguiente paso
 
