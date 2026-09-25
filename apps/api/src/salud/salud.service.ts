@@ -22,7 +22,15 @@ import { HttpException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
+import { buildSavedViewConditions, resolveSavedViewForList } from '../views/views.service.ts';
+import {
+  CUSTOM_FIELD_ENTITY_PATIENT,
+  CUSTOM_FIELD_MODULE_SALUD,
+  loadActiveDefs,
+  validateCustomValues,
+} from '../custom-fields/custom-fields.service.ts';
 import { NOTIFY_TEMPLATE_APPOINTMENT_SCHEDULED, tryEnqueueNotify } from '../notify/notify.service.ts';
+import { assertTransition } from '../state-transitions/state-transitions.service.ts';
 import type { HeaderRecord, TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 
 /** Tenant module this vertical requires (§3.1 property 6 / §3.5). */
@@ -608,15 +616,41 @@ async function findPatient(
 
 // ============ patients ============
 
-/** `patient_file` list inside the membership subtree. */
-export async function listPatients(actor: ActorContext): Promise<PatientRecord[]> {
+/** `patient_file` list inside the membership subtree, plus `?saved_view_id=`. */
+export async function listPatients(
+  actor: ActorContext,
+  savedViewId?: string | null,
+): Promise<PatientRecord[]> {
   const facts = await loadFacts(actor);
   await authorize(actor, facts, {
     action: 'patient.read',
     entity: 'patient_file',
     orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
   });
-  const result = await actor.client.query(LIST_PATIENTS_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
+  const extra =
+    savedViewId === undefined || savedViewId === null || savedViewId === ''
+      ? null
+      : await resolveSavedViewForList(actor, savedViewId, 'patients');
+  if (extra === null) {
+    const result = await actor.client.query(LIST_PATIENTS_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
+    return readRows(result).map(mapPatient);
+  }
+  const conditions = ['tenant_id = $1', 'org_node_id = ANY($2::uuid[])'];
+  const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  const { clauses, values: viewValues } = buildSavedViewConditions(
+    'patients',
+    extra.filters,
+    values.length + 1,
+    actor.traceId,
+  );
+  conditions.push(...clauses);
+  values.push(...viewValues);
+  const result = await actor.client.query(
+    `SELECT ${PATIENT_COLUMNS} FROM patient_files ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY created_at DESC LIMIT ${SALUD_LIST_LIMIT}`,
+    values,
+  );
   return readRows(result).map(mapPatient);
 }
 
@@ -630,6 +664,13 @@ export async function createPatient(actor: ActorContext, body: unknown): Promise
     orgNodeId: input.orgNodeId,
     attemptedAction: 'patient.create',
   });
+  // B2: `active` definitions of (salud, patient) type `contacts` — a missing
+  // `required` code or a mistyped value refuses the write before the insert.
+  validateCustomValues(
+    await loadActiveDefs(actor.client, actor.tenantId, CUSTOM_FIELD_MODULE_SALUD, CUSTOM_FIELD_ENTITY_PATIENT),
+    input.contacts,
+    actor.traceId,
+  );
   const rows = await runInsert(actor, 'A patient with that document already exists', () =>
     actor.client.query(INSERT_PATIENT_SQL, [
       actor.tenantId,
@@ -709,6 +750,13 @@ export async function updatePatient(
   const alerts = record.alerts === undefined ? current.alerts : readStringArray(record.alerts);
   const contacts =
     record.contacts === undefined ? current.contacts : readJsonObject(record.contacts);
+  // B2: the merged bag is what the definitions type — a PATCH that drops a
+  // `required` code or mistypes a value refuses the write like a create.
+  validateCustomValues(
+    await loadActiveDefs(actor.client, actor.tenantId, CUSTOM_FIELD_MODULE_SALUD, CUSTOM_FIELD_ENTITY_PATIENT),
+    contacts,
+    actor.traceId,
+  );
   const active = record.active === undefined ? current.active : record.active === true;
   const result = await actor.client.query(UPDATE_PATIENT_SQL, [
     actor.tenantId,
@@ -809,12 +857,22 @@ export async function closeEpisode(actor: ActorContext, episodeId: string): Prom
   const orgNodeId = readString(row.org_node_id) ?? '';
   const status = readString(row.status) ?? '';
   const facts = await loadFacts(actor);
+  // B3: the closed catalog is consulted alongside the legacy state check;
+  // either term allows, so behavior is unchanged while the seed agrees with
+  // the legacy check (open → closed granted to the episode writer).
+  const transitionAllows = await assertTransition(actor.client, {
+    entity: 'episode',
+    from: status,
+    to: 'closed',
+    role: facts.membership?.role ?? '',
+    tenantId: actor.tenantId,
+  });
   const membership = await authorize(actor, facts, {
     action: 'episode.write',
     entity: 'episode',
     entityId: episodeId,
     orgNodeId,
-    stateAllows: status === 'open',
+    stateAllows: status === 'open' || transitionAllows,
     attemptedAction: 'episode.close',
   });
   const result = await actor.client.query(CLOSE_EPISODE_SQL, [actor.tenantId, episodeId]);
@@ -833,8 +891,11 @@ export async function closeEpisode(actor: ActorContext, episodeId: string): Prom
 
 // ============ appointments ============
 
-/** Appointment agenda scoped to the membership subtree. */
-export async function listAppointments(actor: ActorContext): Promise<AppointmentRecord[]> {
+/** Appointment agenda scoped to the membership subtree, plus `?saved_view_id=`. */
+export async function listAppointments(
+  actor: ActorContext,
+  savedViewId?: string | null,
+): Promise<AppointmentRecord[]> {
   const facts = await loadFacts(actor);
   await authorize(actor, facts, {
     action: 'agenda.read',
@@ -842,7 +903,30 @@ export async function listAppointments(actor: ActorContext): Promise<Appointment
     orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
     attemptedAction: 'appointment.list',
   });
-  const result = await actor.client.query(LIST_APPOINTMENTS_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
+  const extra =
+    savedViewId === undefined || savedViewId === null || savedViewId === ''
+      ? null
+      : await resolveSavedViewForList(actor, savedViewId, 'appointments');
+  if (extra === null) {
+    const result = await actor.client.query(LIST_APPOINTMENTS_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
+    return readRows(result).map(mapAppointment);
+  }
+  const conditions = ['tenant_id = $1', 'org_node_id = ANY($2::uuid[])'];
+  const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  const { clauses, values: viewValues } = buildSavedViewConditions(
+    'appointments',
+    extra.filters,
+    values.length + 1,
+    actor.traceId,
+  );
+  conditions.push(...clauses);
+  values.push(...viewValues);
+  const result = await actor.client.query(
+    `SELECT ${APPOINTMENT_COLUMNS} FROM appointments ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY starts_at DESC LIMIT ${SALUD_LIST_LIMIT}`,
+    values,
+  );
   return readRows(result).map(mapAppointment);
 }
 

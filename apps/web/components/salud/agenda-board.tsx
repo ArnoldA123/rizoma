@@ -1,21 +1,23 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { APPOINTMENT_STATUSES, type AppointmentRecord } from '@rizoma/contracts';
+import { APPOINTMENT_STATUSES, appointmentListSchema, type AppointmentRecord } from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AppointmentForm } from '@/components/salud/appointment-form';
+import { ViewSelector } from '@/components/views/view-selector';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { DEV_IDENTITY } from '@/lib/config';
+import { requestJson } from '@/lib/api-client';
+import { withSavedView } from '@/lib/views-api';
 import {
   appointmentStatusLabel,
   appointmentStatusVariant,
   roleLabel,
 } from '@/lib/labels';
-import { listAppointments } from '@/lib/salud-api';
 import {
   agendaViewFor,
   appointmentsOfProfessional,
@@ -70,8 +72,13 @@ const POLL_MS = 120_000;
 
 export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
   const view: AgendaView = agendaViewFor(role);
-  const appointments = useResource<AppointmentRecord[]>('agenda', (signal) =>
-    listAppointments(signal),
+  // The active saved view narrows the server agenda via `?saved_view_id=`; null
+  // reads the unfiltered scope. The id joins the resource key so a pick
+  // refetches (and the 2-minute poll keeps polling the narrowed list).
+  const [savedViewId, setSavedViewId] = useState<string | null>(null);
+  const appointments = useResource<AppointmentRecord[]>(
+    `agenda:${savedViewId ?? ''}`,
+    (signal) => readAgenda(savedViewId, signal),
   );
   const [day, setDay] = useState<string>(() => currentUtcDate());
   const [focusOwn, setFocusOwn] = useState(view === 'medico');
@@ -132,6 +139,11 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
         </CardHeader>
 
         <CardContent className="flex flex-col gap-4">
+          <ViewSelector
+            entity="appointments"
+            selectedId={savedViewId}
+            onSelect={setSavedViewId}
+          />
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => setDay(shiftUtcDate(day, -1))}>
               Día anterior
@@ -289,6 +301,23 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
       )}
     </div>
   );
+}
+
+/**
+ * Reads the scope agenda through the proxy, narrowed by the active saved view.
+ * Day filtering stays in the browser: the API offers no `?date=`, so the board
+ * keeps reading the scope (now optionally narrowed) and slicing the day locally.
+ */
+async function readAgenda(
+  savedViewId: string | null,
+  signal: AbortSignal,
+): Promise<AppointmentRecord[]> {
+  const rows = await requestJson(
+    withSavedView('/salud/appointments', savedViewId),
+    appointmentListSchema,
+    { signal },
+  );
+  return rows ?? [];
 }
 
 function viewLabel(view: AgendaView): string {

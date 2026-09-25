@@ -15,11 +15,13 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { SkeletonRows } from '@/components/ui/skeleton';
 import { CashSessionPanel } from '@/components/salud/cash-session-panel';
+import { ViewSelector } from '@/components/views/view-selector';
 import { InvoiceDetailPanel } from '@/components/salud/invoice-detail-panel';
 import { InvoiceIssueForm, type InvoiceDraftSeed } from '@/components/salud/invoice-issue-form';
 import { QuotesPanel } from '@/components/salud/quotes-panel';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { requestJson } from '@/lib/api-client';
+import { withSavedView } from '@/lib/views-api';
 import { DEV_IDENTITY } from '@/lib/config';
 import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
 import {
@@ -66,29 +68,38 @@ interface InvoiceFilters {
 
 const EMPTY_INVOICE_FILTERS: InvoiceFilters = { cashSession: '', status: '', from: '', to: '' };
 
-/** Path of `GET /v1/billing/invoices` with exactly the filters the user set. */
-function invoicesPath(filters: InvoiceFilters): string {
+/** Path of `GET /v1/billing/invoices` with the saved view plus exactly the filters the user set. */
+function invoicesPath(filters: InvoiceFilters, savedViewId: string | null): string {
+  // `withSavedView` names the `?saved_view_id=` suffix once; the remaining
+  // filters join with `&` when the suffix is present, `?` when it is not.
+  const base = withSavedView('/billing/invoices', savedViewId);
   const params = new URLSearchParams();
   if (filters.cashSession.trim() !== '') params.set('cashSession', filters.cashSession.trim());
   if (filters.status !== '') params.set('status', filters.status);
   if (filters.from !== '') params.set('from', filters.from);
   if (filters.to !== '') params.set('to', filters.to);
   const query = params.toString();
-  return query === '' ? '/billing/invoices' : `/billing/invoices?${query}`;
+  if (query === '') return base;
+  return `${base}${base.includes('?') ? '&' : '?'}${query}`;
 }
 
 /** Reads the invoice list through the proxy, validated by the billing contract. */
 async function readInvoices(
   filters: InvoiceFilters,
+  savedViewId: string | null,
   signal: AbortSignal,
 ): Promise<readonly InvoiceRecord[]> {
-  const rows = await requestJson(invoicesPath(filters), invoiceListSchema, { signal });
+  const rows = await requestJson(invoicesPath(filters, savedViewId), invoiceListSchema, { signal });
   return rows ?? [];
 }
 
 export function CajaBoard({ role, className }: CajaBoardProps) {
   const [session, setSession] = useState<CashSessionRecord | null>(null);
   const [filters, setFilters] = useState<InvoiceFilters>(EMPTY_INVOICE_FILTERS);
+  // The active saved view narrows the server list via `?saved_view_id=`; null
+  // reads the unfiltered scope. The id joins the resource key so a pick
+  // refetches through the same path as a filter change.
+  const [viewId, setViewId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [lookup, setLookup] = useState('');
@@ -98,9 +109,9 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
   // development value. Every form also remembers the last real row it read.
   const defaultOrgNodeId = session?.orgNodeId ?? DEV_IDENTITY.orgNodeId;
 
-  const filterKey = `${filters.cashSession.trim()}|${filters.status}|${filters.from}|${filters.to}`;
+  const filterKey = `${filters.cashSession.trim()}|${filters.status}|${filters.from}|${filters.to}|${viewId ?? ''}`;
   const invoices = useResource<readonly InvoiceRecord[]>(`invoices:${filterKey}`, (signal) =>
-    readInvoices(filters, signal),
+    readInvoices(filters, viewId, signal),
   );
   const rows = invoices.data ?? [];
   const current = useMemo(() => paginate(rows, page), [rows, page]);
@@ -159,6 +170,14 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
         </CardHeader>
 
         <CardContent className="flex flex-col gap-4">
+          <ViewSelector
+            entity="invoices"
+            selectedId={viewId}
+            onSelect={(next) => {
+              setViewId(next);
+              setPage(1);
+            }}
+          />
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="flex flex-col gap-1.5">
               <label htmlFor="invoice-filter-session" className="text-[0.8125rem] font-medium">

@@ -35,7 +35,8 @@ export class AttendanceController {
     @Req() req: TenantScopedRequest,
     @Query('site') site: string | undefined,
     @Query('date') date: string | undefined,
+    @Query('saved_view_id') savedViewId?: string,
   ): Promise<AttendanceRecord[]> {
-    return dayAttendance(actorFromRequest(req), site ?? '', date ?? '');
+    return dayAttendance(actorFromRequest(req), site ?? '', date ?? '', savedViewId ?? null);
   }
 }

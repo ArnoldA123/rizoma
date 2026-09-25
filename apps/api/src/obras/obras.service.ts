@@ -29,6 +29,8 @@ import { HttpException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
+import { buildSavedViewConditions, resolveSavedViewForList } from '../views/views.service.ts';
+import { assertTransition } from '../state-transitions/state-transitions.service.ts';
 import type { HeaderRecord, TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 
 /** Tenant module this vertical requires (§3.1 property 6 / §3.5). */
@@ -1013,16 +1015,26 @@ export async function approveAttendance(
   const site = await findSite(actor, current.siteId);
   if (site === null) throw notFound('site', actor.traceId);
   const facts = await loadFacts(actor);
+  // B3: the closed catalog is consulted alongside the legacy state check;
+  // either term allows, so behavior is unchanged while the seed agrees with
+  // the legacy check (registered → approved granted to the approver roles).
+  const transitionAllows = await assertTransition(actor.client, {
+    entity: 'attendance',
+    from: current.status,
+    to: 'approved',
+    role: facts.membership?.role ?? '',
+    tenantId: actor.tenantId,
+  });
   const membership = await authorize(actor, facts, {
     action: 'attendance.approve',
     entity: 'attendance',
     entityId: current.id,
     orgNodeId: site.orgNodeId,
-    stateAllows: current.status === 'registered',
+    stateAllows: current.status === 'registered' || transitionAllows,
     attemptedAction: 'attendance.approve',
     denied: (reason) => approveDenied(reason, actor.traceId),
   });
-  if (current.status !== 'registered') {
+  if (current.status !== 'registered' && !transitionAllows) {
     return deny(actor, approveDenied('state.not_registered', actor.traceId), {
       reason: 'obra.state_denied',
       entity: 'attendance',
@@ -1087,14 +1099,41 @@ async function leadsWorkerCrew(
   return readRows(result).length > 0;
 }
 
-/** Attendance marks of one day at one site (§3.4 "Asistencia"). */
+/** Attendance marks of one day at one site (§3.4 "Asistencia"), plus `?saved_view_id=`. */
 export async function dayAttendance(
   actor: ObraActorContext,
   siteId: string,
   date: string,
+  savedViewId?: string | null,
 ): Promise<AttendanceRecord[]> {
   if (!DATE_RE.test(date)) throw badRequest('date must be YYYY-MM-DD', actor.traceId);
   const site = await requireSiteAccess(actor, actor.userId, siteId);
-  const result = await actor.client.query(DAY_ATTENDANCE_SQL, [actor.tenantId, site.id, date]);
+  const extra =
+    savedViewId === undefined || savedViewId === null || savedViewId === ''
+      ? null
+      : await resolveSavedViewForList(actor, savedViewId, 'attendance');
+  if (extra === null) {
+    const result = await actor.client.query(DAY_ATTENDANCE_SQL, [actor.tenantId, site.id, date]);
+    return readRows(result).map(mapAttendance);
+  }
+  const { clauses, values: viewValues } = buildSavedViewConditions(
+    'attendance',
+    extra.filters,
+    4,
+    actor.traceId,
+  );
+  const conditions = [
+    'tenant_id = $1',
+    'site_id = $2',
+    "check_in >= $3::date",
+    "check_in < ($3::date + INTERVAL '1 day')",
+    ...clauses,
+  ];
+  const result = await actor.client.query(
+    `SELECT ${ATTENDANCE_COLUMNS} FROM attendance ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY check_in DESC LIMIT ${OBRA_LIST_LIMIT}`,
+    [actor.tenantId, site.id, date, ...viewValues],
+  );
   return readRows(result).map(mapAttendance);
 }

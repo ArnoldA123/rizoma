@@ -36,6 +36,7 @@ import { createHash } from 'node:crypto';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
 import { SALUD_MODULE, actorFromRequest, type ActorContext, type SaludClient } from '../salud/salud.service.ts';
+import { buildSavedViewConditions, resolveSavedViewForList } from '../views/views.service.ts';
 import { enqueueInvoiceWebhooks } from '../webhooks/webhooks.ts';
 import { NOTIFY_TEMPLATE_INVOICE_ISSUED, tryEnqueueNotify } from '../notify/notify.service.ts';
 
@@ -986,6 +987,18 @@ export async function listInvoices(actor: ActorContext, query: unknown): Promise
   if (filters.to !== null) {
     values.push(filters.to);
     conditions.push(`COALESCE(issued_at, created_at) <= $${values.length}::timestamptz`);
+  }
+  const savedViewId = readOptionalFilter(asRecord(query).saved_view_id);
+  if (savedViewId !== null) {
+    const extra = await resolveSavedViewForList(actor, savedViewId, 'invoices');
+    const { clauses, values: viewValues } = buildSavedViewConditions(
+      'invoices',
+      extra.filters,
+      values.length + 1,
+      actor.traceId,
+    );
+    conditions.push(...clauses);
+    values.push(...viewValues);
   }
   const result = await actor.client.query(
     `SELECT ${INVOICE_COLUMNS} FROM invoices ` +
