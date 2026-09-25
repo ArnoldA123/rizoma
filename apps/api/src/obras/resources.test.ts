@@ -18,6 +18,9 @@ import {
   createBudgetLine,
   createItem,
   createSiteLog,
+  listAssets,
+  listItems,
+  listMoves,
   listProgressEntries,
   listSiteLogs,
   postProgress,
@@ -93,6 +96,7 @@ interface FakeState {
   milestones: Map<string, Row>;
   siteLogs: Map<string, Row>;
   audits: Row[];
+  queries: string[];
   sequence: number;
 }
 
@@ -251,6 +255,7 @@ function baseState(overrides: Partial<FakeState> = {}): FakeState {
     milestones: new Map<string, Row>(),
     siteLogs: new Map<string, Row>(),
     audits: [],
+    queries: [],
     sequence: 0,
     ...overrides,
   };
@@ -298,6 +303,7 @@ function createDb(state: FakeState): FakeDb {
   const client: ObraClient = {
     async query(text: string, values: readonly unknown[] = []): Promise<unknown> {
       await Promise.resolve();
+      state.queries.push(text);
       const v = values;
 
       // ---- audit (write and denial share the table) ----
@@ -381,6 +387,13 @@ function createDb(state: FakeState): FakeDb {
         const row = state.assets.get(String(v[1]));
         return { rows: row === undefined ? [] : [row] };
       }
+      if (text.includes('FROM assets WHERE tenant_id = $1 AND org_node_id = ANY')) {
+        const scope = new Set((v[1] as readonly unknown[]).map(String));
+        const rows = [...state.assets.values()]
+          .filter((row) => scope.has(String(row.org_node_id)))
+          .sort((a, b) => String(a.code).localeCompare(String(b.code)));
+        return { rows };
+      }
       if (text.includes('INSERT INTO asset_readings')) {
         const row: Row = {
           id: nextId(state),
@@ -415,6 +428,12 @@ function createDb(state: FakeState): FakeDb {
         const row = state.items.get(String(v[1]));
         return { rows: row === undefined ? [] : [row] };
       }
+      if (text.includes('FROM inventory_items WHERE tenant_id = $1')) {
+        const rows = [...state.items.values()].sort((a, b) =>
+          String(a.sku).localeCompare(String(b.sku)),
+        );
+        return { rows };
+      }
 
       // ---- stock moves ----
       if (text.includes('INSERT INTO stock_moves')) {
@@ -444,6 +463,13 @@ function createDb(state: FakeState): FakeDb {
       if (text.includes('FROM stock_moves WHERE tenant_id = $1 AND id = $2')) {
         const row = state.moves.get(String(v[1]));
         return { rows: row === undefined ? [] : [row] };
+      }
+      if (text.includes('FROM stock_moves WHERE tenant_id = $1 AND warehouse_node_id = ANY')) {
+        const scope = new Set((v[1] as readonly unknown[]).map(String));
+        const rows = [...state.moves.values()]
+          .filter((row) => scope.has(String(row.warehouse_node_id)))
+          .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+        return { rows };
       }
       if (text.includes('UPDATE stock_moves')) {
         const row = state.moves.get(String(v[1]));
@@ -784,6 +810,69 @@ describe('recordReading', () => {
   });
 });
 
+// ============ asset list ============
+
+describe('listAssets', () => {
+  it('lists the subtree units ordered by code', async () => {
+    const inScope = assetRow({ code: 'EQ-002', org_node_id: NODE_A });
+    const alsoInScope = assetRow({
+      id: 'f3000000-0000-4000-8000-000000000005',
+      code: 'EQ-001',
+      org_node_id: SEDE,
+    });
+    const outOfScope = assetRow({
+      id: 'f3000000-0000-4000-8000-000000000006',
+      code: 'EQ-000',
+      org_node_id: NODE_B,
+    });
+    const db = makeDb({
+      callerUserId: U_JEFE,
+      subtree: [SEDE, NODE_A],
+      assets: new Map([
+        [inScope.id as string, inScope],
+        [alsoInScope.id as string, alsoInScope],
+        [outOfScope.id as string, outOfScope],
+      ]),
+    });
+    const rows = await listAssets(actor(db));
+    assert.deepEqual(
+      rows.map((row) => row.code),
+      ['EQ-001', 'EQ-002'],
+    );
+  });
+
+  it('answers an empty list when the subtree holds no unit', async () => {
+    const db = makeDb({ callerUserId: U_JEFE, subtree: [SEDE, NODE_A] });
+    assert.deepEqual(await listAssets(actor(db)), []);
+  });
+
+  it('denies a caller without membership and audits the denial', async () => {
+    const db = makeDb({
+      callerUserId: 'd3000000-0000-4000-8000-000000000099',
+      memberships: new Map(),
+      subtree: [],
+    });
+    await expectHttp(listAssets(actor(db)), 403, 'obra.scope_denied', 'membership.inactive');
+    assert.equal(auditsOf(db.state, 'access.denied').length, 1);
+  });
+
+  it('caps the answer at 200 rows like the other list endpoints', async () => {
+    const db = makeDb();
+    await listAssets(actor(db));
+    assert.equal(
+      db.state.queries.some((text) => text.includes('LIMIT 200')),
+      true,
+      'the issued SQL carries the cap',
+    );
+  });
+
+  it('writes no audit row on a successful read', async () => {
+    const db = makeDb({ assets: new Map([[ASSET_AVAILABLE, assetRow()]]) });
+    await listAssets(actor(db));
+    assert.equal(db.state.audits.length, 0);
+  });
+});
+
 // ============ warehouse items ============
 
 describe('createItem', () => {
@@ -803,6 +892,54 @@ describe('createItem', () => {
   it('denies trabajador creating an item (no stock.consume)', async () => {
     const db = makeDb({ callerUserId: U_WORKER, subtree: [NODE_A] });
     await expectHttp(createItem(actor(db), { sku: 'X-1', name: 'X', unit: 'u' }), 403, 'obra.scope_denied', 'role.denied');
+  });
+});
+
+// ============ item list ============
+
+describe('listItems', () => {
+  it('lists the tenant items ordered by sku', async () => {
+    const second = itemRow({ id: 'f3000000-0000-4000-8000-000000000012', sku: 'BLO-001', name: 'Bloque' });
+    const db = makeDb({
+      callerUserId: U_ALMACEN,
+      items: new Map([
+        [ITEM_A, itemRow()],
+        [second.id as string, second],
+      ]),
+    });
+    const rows = await listItems(actor(db));
+    assert.deepEqual(
+      rows.map((row) => row.sku),
+      ['BLO-001', 'CEM-001'],
+    );
+  });
+
+  it('lets a worker read the catalogue: items carry no org scope', async () => {
+    const db = makeDb({ callerUserId: U_WORKER, subtree: [NODE_A] });
+    const rows = await listItems(actor(db));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.sku, 'CEM-001');
+  });
+
+  it('denies a caller without membership and audits the denial', async () => {
+    const db = makeDb({
+      callerUserId: 'd3000000-0000-4000-8000-000000000099',
+      memberships: new Map(),
+      subtree: [],
+    });
+    await expectHttp(listItems(actor(db)), 403, 'obra.scope_denied', 'membership.inactive');
+    assert.equal(auditsOf(db.state, 'access.denied').length, 1);
+  });
+
+  it('caps the answer at 200 rows and writes no audit row on a read', async () => {
+    const db = makeDb();
+    await listItems(actor(db));
+    assert.equal(
+      db.state.queries.some((text) => text.includes('LIMIT 200')),
+      true,
+      'the issued SQL carries the cap',
+    );
+    assert.equal(db.state.audits.length, 0);
   });
 });
 
@@ -923,6 +1060,64 @@ describe('reverseMove', () => {
   it('reports an unknown move as not found', async () => {
     const db = makeDb({ callerUserId: U_ALMACEN });
     await expectHttp(reverseMove(actor(db), 'f3000000-0000-4000-8000-00000000ffff'), 404, 'not_found');
+  });
+});
+
+// ============ stock move list ============
+
+describe('listMoves', () => {
+  it('lists the subtree warehouse moves, newest first', async () => {
+    const older = moveRow({ id: 'f3000000-0000-4000-8000-000000000071', at: '2026-03-01T12:00:00.000Z' });
+    const newer = moveRow({
+      id: 'f3000000-0000-4000-8000-000000000072',
+      at: '2026-03-02T12:00:00.000Z',
+      kind: 'out',
+      site_id: SITE_A,
+    });
+    const outOfScope = moveRow({
+      id: 'f3000000-0000-4000-8000-000000000073',
+      warehouse_node_id: NODE_B,
+    });
+    const db = makeDb({
+      callerUserId: U_ALMACEN,
+      subtree: [EMPRESA, NODE_A],
+      moves: new Map([
+        [older.id as string, older],
+        [newer.id as string, newer],
+        [outOfScope.id as string, outOfScope],
+      ]),
+    });
+    const rows = await listMoves(actor(db));
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      [newer.id, older.id],
+    );
+  });
+
+  it('answers an empty list when no subtree warehouse moved stock', async () => {
+    const db = makeDb({ callerUserId: U_ALMACEN, subtree: [EMPRESA, NODE_A] });
+    assert.deepEqual(await listMoves(actor(db)), []);
+  });
+
+  it('denies a caller without membership and audits the denial', async () => {
+    const db = makeDb({
+      callerUserId: 'd3000000-0000-4000-8000-000000000099',
+      memberships: new Map(),
+      subtree: [],
+    });
+    await expectHttp(listMoves(actor(db)), 403, 'obra.scope_denied', 'membership.inactive');
+    assert.equal(auditsOf(db.state, 'access.denied').length, 1);
+  });
+
+  it('caps the answer at 200 rows and writes no audit row on a read', async () => {
+    const db = makeDb({ callerUserId: U_ALMACEN });
+    await listMoves(actor(db));
+    assert.equal(
+      db.state.queries.some((text) => text.includes('LIMIT 200')),
+      true,
+      'the issued SQL carries the cap',
+    );
+    assert.equal(db.state.audits.length, 0);
   });
 });
 

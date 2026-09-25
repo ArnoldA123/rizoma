@@ -2,11 +2,12 @@
 // (bases-consolidadas-v1.md §2.4, §3.4). The state machine, the site guard and
 // the write audit stay in the service; each handler only forwards the
 // request-bound tenant client.
-import { Body, Controller, HttpCode, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, Req } from '@nestjs/common';
 import type { TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 import { actorFromRequest } from './obras.service.ts';
 import {
   assignAsset,
+  listAssets,
   recordReading,
   registerAsset,
   retireAsset,
@@ -17,6 +18,12 @@ import {
 
 @Controller('obras/assets')
 export class AssetsController {
+  /** `GET /v1/obras/assets` — units inside the membership subtree, capped at 200. */
+  @Get()
+  list(@Req() req: TenantScopedRequest): Promise<AssetRecord[]> {
+    return listAssets(actorFromRequest(req));
+  }
+
   /** `POST /v1/obras/assets` — register an equipment unit (`site.write`). */
   @Post()
   register(@Req() req: TenantScopedRequest, @Body() body: unknown): Promise<AssetRecord> {
