@@ -36,6 +36,7 @@ import { createHash } from 'node:crypto';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
 import { SALUD_MODULE, actorFromRequest, type ActorContext, type SaludClient } from '../salud/salud.service.ts';
+import { enqueueInvoiceWebhooks } from '../webhooks/webhooks.ts';
 
 export { actorFromRequest };
 export type { ActorContext, SaludClient };
@@ -1098,6 +1099,11 @@ export async function issueInvoice(
       throw billingError(BILLING_ERROR.writeFailed, 'Invoice issue returned no row', 500, actor.traceId);
     }
     const invoice = mapInvoice(issuedRow);
+    await enqueueInvoiceWebhooks(actor.client, actor.tenantId, {
+      event: 'invoice.issued',
+      invoiceId: invoice.id,
+      payload: { invoiceId: invoice.id, serie: invoice.serie, numero: invoice.numero, total: invoice.total },
+    });
     await writeAudit(actor, membership, {
       action: 'invoice.issued',
       entity: 'invoice',
@@ -1208,6 +1214,11 @@ export async function payInvoice(
     throw billingError(BILLING_ERROR.writeFailed, 'Invoice payment update returned no row', 500, actor.traceId);
   }
   const invoice = mapInvoice(updatedRow);
+  await enqueueInvoiceWebhooks(actor.client, actor.tenantId, {
+    event: 'invoice.paid',
+    invoiceId: invoice.id,
+    payload: { invoiceId: invoice.id, status: invoice.status, paid: newPaid, total: invoice.total },
+  });
   await writeAudit(actor, membership, {
     action: 'invoice.paid',
     entity: 'invoice',
@@ -1254,6 +1265,11 @@ export async function voidInvoice(
     throw billingError(BILLING_ERROR.writeFailed, 'Invoice void returned no row', 500, actor.traceId);
   }
   const invoice = mapInvoice(row);
+  await enqueueInvoiceWebhooks(actor.client, actor.tenantId, {
+    event: 'invoice.voided',
+    invoiceId: invoice.id,
+    payload: { invoiceId: invoice.id, from: current.status, to: 'voided' },
+  });
   await writeAudit(actor, membership, {
     action: 'invoice.voided',
     entity: 'invoice',

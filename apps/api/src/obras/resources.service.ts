@@ -36,6 +36,7 @@
 //   milestones:   late when the due date is already in the past, else pending
 import { HttpException } from '@nestjs/common';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
+import { enqueueWebhooks } from '../webhooks/webhooks.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
 import {
   OBRA_LIST_LIMIT,
@@ -1221,6 +1222,21 @@ export async function postStockMove(
     );
   }
   const move = mapMove(row);
+  // Same-tx outbox fan-out (W3): `stock.posted` deliveries commit or roll back
+  // with the move. No guard here — `stock.consume` already authorized it.
+  await enqueueWebhooks(actor.client, actor.tenantId, {
+    event: 'stock.posted',
+    eventId: move.id,
+    payload: {
+      moveId: move.id,
+      itemId: move.itemId,
+      warehouseNodeId: move.warehouseNodeId,
+      siteId: move.siteId,
+      qty: move.qty,
+      kind: move.kind,
+      status: move.status,
+    },
+  });
   await writeAudit(actor, membership, {
     action: 'stock_move.posted',
     entity: 'stock_move',
@@ -1263,6 +1279,22 @@ export async function reverseMove(
   const row = readRows(result)[0];
   if (row === undefined) throw stateDenied('stock_move.not_posted', actor.traceId);
   const reversed = mapMove(row);
+  // Same-tx outbox fan-out (W3): `stock.reversed` deliveries commit or roll
+  // back with the reversal. No guard here — `stock.consume` authorized it.
+  await enqueueWebhooks(actor.client, actor.tenantId, {
+    event: 'stock.reversed',
+    eventId: reversed.id,
+    payload: {
+      moveId: reversed.id,
+      itemId: reversed.itemId,
+      warehouseNodeId: reversed.warehouseNodeId,
+      siteId: reversed.siteId,
+      qty: reversed.qty,
+      kind: reversed.kind,
+      from: 'posted',
+      to: 'reversed',
+    },
+  });
   await writeAudit(actor, membership, {
     action: 'stock_move.reversed',
     entity: 'stock_move',
