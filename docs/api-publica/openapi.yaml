@@ -1,0 +1,587 @@
+openapi: 3.1.0
+info:
+  title: Rizoma Public API
+  version: 1.0.0
+  description: |
+    Public management surface of Rizoma: tenant API keys and webhook
+    subscriptions with observable deliveries. This document describes ONLY
+    what the code implements (verified against
+    `apps/api/src/auth/api-keys*.ts`,
+    `apps/api/src/webhooks/webhooks*.ts`,
+    `packages/contracts/src/api-keys.ts`,
+    `packages/contracts/src/webhooks.ts` and
+    `apps/workers/src/webhook-signer.ts`).
+    Management endpoints require a tenant admin membership (`ti_admin` or
+    `direccion`); callers authenticated with `X-Api-Key` are denied with
+    `role.denied`. There is no public read endpoint for `usage_counters`;
+    counters are server-side observability only.
+servers:
+  - url: https://api.rizoma.local/v1
+    description: Reference server URL. Replace with the deployment base URL.
+security:
+  - ApiKeyAuth: []
+tags:
+  - name: api-keys
+    description: Issue, list and revoke tenant machine credentials.
+  - name: webhooks
+    description: Subscribe signed business events and observe deliveries.
+paths:
+  /api-keys:
+    post:
+      tags:
+        - api-keys
+      summary: Issue one API key
+      description: |
+        Issues one opaque secret (`rizoma_...`, 256-bit entropy). The secret
+        is returned exactly once in this response and stored only as a
+        SHA-256 digest. Requires a tenant admin membership.
+      operationId: createApiKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreateInput'
+      responses:
+        '201':
+          description: Key issued. The `secret` field appears only here.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags:
+        - api-keys
+      summary: List tenant API keys
+      description: Lists the tenant keys, newest first, capped at 200 rows, without secrets.
+      operationId: listApiKeys
+      responses:
+        '200':
+          description: Key list (identification only, no secrets).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKeyRecord'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api-keys/{id}/revoke:
+    post:
+      tags:
+        - api-keys
+      summary: Revoke one API key
+      description: |
+        Sets `active = false`. Idempotent: revoking an already revoked key
+        answers the row again. Effective on the next request (verification
+        reads the table on every request; no permission cache).
+      operationId: revokeApiKey
+      parameters:
+        - $ref: '#/components/parameters/UuidId'
+      responses:
+        '201':
+          description: Key row after revocation (no secret).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /webhooks/subscriptions:
+    post:
+      tags:
+        - webhooks
+      summary: Register one webhook subscription
+      description: |
+        Registers one HTTPS URL plus the events it receives. The signing
+        secret (`whsec_...`) is returned exactly once in this response and
+        stored only as a SHA-256 digest.
+      operationId: createWebhookSubscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscriptionCreateInput'
+      responses:
+        '201':
+          description: Subscription created. The `secret` field appears only here.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptionCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags:
+        - webhooks
+      summary: List webhook subscriptions
+      description: Lists the tenant subscriptions, newest first, capped at 200 rows. Never carries secrets.
+      operationId: listWebhookSubscriptions
+      responses:
+        '200':
+          description: Subscription list (digest only, no secrets).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookSubscriptionRecord'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /webhooks/subscriptions/{id}:
+    patch:
+      tags:
+        - webhooks
+      summary: Edit one subscription
+      description: Edits the URL, the event set or the active flag. At least one field is required.
+      operationId: updateWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/UuidId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscriptionUpdateInput'
+      responses:
+        '200':
+          description: Updated subscription (no secret).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptionRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - webhooks
+      summary: Remove one subscription
+      description: |
+        Removes one subscription. A subscription with delivery history cannot
+        be removed (409 `webhook.subscription_in_use`): deactivate it with
+        PATCH instead so the history stays queryable.
+      operationId: removeWebhookSubscription
+      parameters:
+        - $ref: '#/components/parameters/UuidId'
+      responses:
+        '200':
+          description: Removed subscription row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptionRecord'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/SubscriptionInUse'
+  /webhooks/subscriptions/{id}/rotate:
+    post:
+      tags:
+        - webhooks
+      summary: Rotate the signing secret
+      description: |
+        Replaces the signing secret. The new secret is shown exactly once in
+        this response. Deliveries already queued keep the bytes they were
+        enqueued with.
+      operationId: rotateWebhookSecret
+      parameters:
+        - $ref: '#/components/parameters/UuidId'
+      responses:
+        '201':
+          description: Subscription with the new secret, shown exactly once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptionCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /webhooks/deliveries:
+    get:
+      tags:
+        - webhooks
+      summary: List webhook deliveries
+      description: |
+        Read-only retry observability, newest first, capped at 200 rows.
+        Every filter is optional; a malformed UUID, an unknown status or an
+        unknown event answers 400, never a silently ignored filter.
+      operationId: listWebhookDeliveries
+      parameters:
+        - name: subscriptionId
+          in: query
+          required: false
+          description: Filter by owning subscription (UUID).
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          description: Filter by delivery status.
+          schema:
+            $ref: '#/components/schemas/WebhookDeliveryStatus'
+        - name: event
+          in: query
+          required: false
+          description: Filter by business event.
+          schema:
+            $ref: '#/components/schemas/WebhookEvent'
+      responses:
+        '200':
+          description: Delivery list with retry state.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookDeliveryRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /webhooks/deliveries/{id}:
+    get:
+      tags:
+        - webhooks
+      summary: Get one webhook delivery
+      description: Returns one delivery with its retry state (`attempts`, `nextRetryAt`).
+      operationId: getWebhookDelivery
+      parameters:
+        - $ref: '#/components/parameters/UuidId'
+      responses:
+        '200':
+          description: One delivery with its retry state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDeliveryRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Opaque machine secret (`rizoma_...`). A presented key that does not
+        verify is rejected with 401 `auth.api_key_invalid` (fail closed).
+        Management endpoints additionally require a tenant admin membership,
+        so `X-Api-Key` callers are denied with `role.denied`; use a human
+        admin session for management.
+  parameters:
+    UuidId:
+      name: id
+      in: path
+      required: true
+      description: Resource id (UUID).
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Body, param or filter failed validation (`validation.failed`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: No tenant context (`tenant.missing`) or guard denial (`access.denied`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Unknown id in the tenant (`not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    SubscriptionInUse:
+      description: The subscription has delivery history (`webhook.subscription_in_use`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    ApiKeyCreateInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Operator label, never the secret.
+        scopes:
+          type: array
+          default: []
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+          description: OAuth-style scopes the key grants; empty means no scope.
+        validTo:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Optional expiry (ISO-8601, must be in the future); null or absent means no expiry.
+      additionalProperties: false
+    ApiKeyRecord:
+      type: object
+      required:
+        - id
+        - tenantId
+        - name
+        - keyPrefix
+        - scopes
+        - active
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        keyPrefix:
+          type: string
+          description: Short public identifier (leading SHA-256 bytes); display only.
+        scopes:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        validFrom:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        validTo:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        createdAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      additionalProperties: false
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKeyRecord'
+        - type: object
+          required:
+            - secret
+          properties:
+            secret:
+              type: string
+              description: Opaque secret (`rizoma_...`); shown exactly once, never again.
+          additionalProperties: false
+    WebhookEvent:
+      type: string
+      enum:
+        - invoice.issued
+        - invoice.paid
+        - invoice.voided
+        - stock.posted
+        - stock.reversed
+        - onboarding.closed
+    WebhookDeliveryStatus:
+      type: string
+      enum:
+        - queued
+        - sent
+        - failed
+    WebhookSubscriptionCreateInput:
+      type: object
+      required:
+        - url
+        - events
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2000
+          description: HTTPS endpoint the worker POSTs signed payloads to (http accepted for local development).
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEvent'
+          description: Events to receive; at least one, no duplicates.
+      additionalProperties: false
+    WebhookSubscriptionUpdateInput:
+      type: object
+      minProperties: 1
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2000
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEvent'
+        active:
+          type: boolean
+      additionalProperties: false
+    WebhookSubscriptionRecord:
+      type: object
+      required:
+        - id
+        - tenantId
+        - url
+        - events
+        - active
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        url:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookEvent'
+        active:
+          type: boolean
+        createdAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      additionalProperties: false
+    WebhookSubscriptionCreated:
+      allOf:
+        - $ref: '#/components/schemas/WebhookSubscriptionRecord'
+        - type: object
+          required:
+            - secret
+          properties:
+            secret:
+              type: string
+              description: Opaque signing secret (`whsec_...`); shown exactly once, never again.
+          additionalProperties: false
+    WebhookDeliveryRecord:
+      type: object
+      required:
+        - id
+        - tenantId
+        - event
+        - url
+        - status
+        - attempts
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        subscriptionId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: Owning subscription; null when the subscription was removed.
+        event:
+          $ref: '#/components/schemas/WebhookEvent'
+        url:
+          type: string
+          description: Target URL frozen at enqueue time.
+        status:
+          $ref: '#/components/schemas/WebhookDeliveryStatus'
+        attempts:
+          type: integer
+          minimum: 0
+          description: Attempts already made; the next delay follows the backoff schedule.
+        nextRetryAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: When the worker may retry; null once delivered or exhausted.
+        createdAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+      additionalProperties: false
+    ErrorEnvelope:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Machine code (`validation.failed`, `access.denied`, `tenant.missing`, `not_found`, `auth.api_key_invalid`, `webhook.subscription_in_use`).
+        message:
+          type: string
+        reason:
+          type: string
+          description: Guard reason, present on `access.denied`.
+        traceId:
+          type: string
+      additionalProperties: false
+webhooks:
+  businessEvent:
+    post:
+      summary: Signed business event delivery
+      description: |
+        The worker POSTs the frozen JSON payload to the subscription URL
+        with `content-type: application/json` and four headers:
+        `x-webhook-signature: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>`,
+        `x-webhook-timestamp` (Unix-epoch seconds),
+        `x-webhook-event` (business event name) and
+        `x-webhook-delivery` (delivery id, for receiver-side idempotency).
+        The receiver rejects signatures older than its tolerance (default
+        window in code: 300 seconds). Any 2xx counts as success; otherwise
+        the row goes back to `queued` with `next_retry_at` following the
+        backoff schedule [60, 300, 1800, 7200, 21600] seconds, or to
+        `failed` once retries are exhausted. BullMQ retries are disabled;
+        the retry schedule lives on the row, so retries stay observable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Event payload frozen at enqueue time (JSON-serializable business fact).
+      responses:
+        '200':
+          description: Any 2xx marks the delivery `sent`. The event is idempotent by delivery id.

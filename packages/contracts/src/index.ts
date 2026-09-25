@@ -16,3 +16,5 @@ export * from './billing.ts';
 export * from './obras.ts';
 export * from './obras-operations.ts';
 export * from './boards.ts';
+export * from './api-keys.ts';
+export * from './webhooks.ts';

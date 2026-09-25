@@ -11,7 +11,7 @@
     "build": "echo \"[workers] build — nothing to compile (node --test strips types)\"",
     "lint": "echo \"[workers] lint\"",
     "typecheck": "echo \"[workers] typecheck\"",
-    "test": "node --test src/fiscal/adapter.test.ts"
+    "test": "node --test src/fiscal/adapter.test.ts src/webhook-deliver.test.ts"
   },
   "dependencies": {
     "bullmq": "^5.34.0",
