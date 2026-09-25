@@ -35,6 +35,21 @@
 // and `obras/dashboards.controller.ts` + `obras/dashboards.service.ts` (site
 // board and company board, §6.2). Both services stay plain and own their guard,
 // scope and SQL.
+// A11 (MVP1 Salud H1) mounts the triage and prescription endpoints:
+// `salud/triages.controller.ts` (insert-only vital signs, `patient.write`) and
+// `salud/prescriptions.controller.ts` (template orders, `episode.write`). Their
+// plain `salud/triages.service.ts` and `salud/prescriptions.service.ts` follow
+// the same split: scope through the patient sede, one audit row per write.
+// A12 (H3) mounts the first-run onboarding endpoint: `onboarding.controller.ts`
+// is thin and decorator-only — the setup persistence (cases table, app_state
+// gate, acta payload) lives in the plain `onboarding/store.ts`, which imports
+// no Nest decorators so it stays loadable under strip-only TypeScript.
+// The routes run before any tenant exists (migration 002, pre-tenant setup
+// role), so they are excluded from the tenant middleware below.
+// A13 (H2) mounts the signed file endpoints: `files.controller.ts` is thin
+// and decorator-only — the plain `files/files.service.ts` owns validation,
+// the guard, the canonical key (`files/paths.ts`), the manual SigV4 presigner
+// (`files/s3.ts`, no AWS SDK) and the write audit, following the same split.
 //
 // Only the JWT verifier needs a provider: the guard is a pure function over
 // facts the endpoint owns (identity, membership, entity, module), so there is
@@ -49,7 +64,8 @@
 // stripping, which cannot parse decorators and would make the tenant contract
 // untestable. The pool and the verifier therefore reach it through the module
 // instead of `@Inject`, and it is applied to the versioned API surface only
-// (`/v1/*`): `/health` and future operational paths stay outside the tenant
+// (`/v1/*`): `/health`, the pre-tenant `/onboarding` setup routes, and future
+// operational paths stay outside the tenant
 // transaction.
 import {
   Inject,
@@ -66,12 +82,16 @@ import {
 import { CONFIG_TOKEN, load, type ApiConfig } from './config/configuration.ts';
 import { HealthController, REDIS_CLIENT, createRedisClient } from './health/health.controller.ts';
 import { BillingController } from './billing/billing.controller.ts';
+import { FilesController } from './files/files.controller.ts';
+import { OnboardingController } from './onboarding/onboarding.controller.ts';
 import { AppointmentsController } from './salud/appointments.controller.ts';
 import { ConsentsController } from './salud/consents.controller.ts';
 import { DashboardsController } from './salud/dashboards.controller.ts';
 import { EpisodesController } from './salud/episodes.controller.ts';
 import { ImportsController } from './salud/import.controller.ts';
 import { PatientsController } from './salud/patients.controller.ts';
+import { PrescriptionsController } from './salud/prescriptions.controller.ts';
+import { TriagesController } from './salud/triages.controller.ts';
 import { AttendanceController } from './obras/attendance.controller.ts';
 import { AssetsController } from './obras/assets.controller.ts';
 import { ObrasDashboardsController } from './obras/dashboards.controller.ts';
@@ -93,11 +113,15 @@ import {
 @Module({
   controllers: [
     HealthController,
+    OnboardingController,
     PatientsController,
     EpisodesController,
     AppointmentsController,
     ConsentsController,
+    TriagesController,
+    PrescriptionsController,
     BillingController,
+    FilesController,
     ImportsController,
     DashboardsController,
     SitesController,
@@ -161,7 +185,14 @@ export class AppModule implements NestModule {
       // is therefore explicitly excluded: readiness must stay untransactional
       // and must not depend on a tenant header. `{*path}` is the Express 5
       // named wildcard understood by Nest's legacy route converter.
-      .exclude({ path: 'health', method: RequestMethod.ALL })
+      // `onboarding` is therefore explicitly excluded too: the first-run wizard
+      // runs before any tenant exists (migration 002 pre-tenant setup role),
+      // so there is no tenant context to bind.
+      .exclude(
+        { path: 'health', method: RequestMethod.ALL },
+        { path: 'onboarding', method: RequestMethod.ALL },
+        { path: 'onboarding/{*path}', method: RequestMethod.ALL },
+      )
       .forRoutes({ path: '{*path}', method: RequestMethod.ALL });
   }
 }

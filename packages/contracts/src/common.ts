@@ -75,3 +75,14 @@ export interface DeniedState {
   readonly reason: string;
   readonly traceId: string;
 }
+
+// Onboarding HTTP contracts (H3): re-exported here so the public entry point
+// (`index.ts`, which already re-exports this module) exposes them without
+// touching the entry file. `onboarding.ts` imports only `zod`, so this
+// re-export creates no import cycle back into this module.
+export * from './onboarding.ts';
+
+// Signed file contracts (H2): same wiring as onboarding — `files.ts` imports
+// only `zod`, so re-exporting it here exposes the schemas through the public
+// entry point without touching `index.ts` and without an import cycle.
+export * from './files.ts';

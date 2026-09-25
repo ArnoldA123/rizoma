@@ -688,6 +688,15 @@ const INSERT_PROGRESS_SQL = `INSERT INTO progress_entries
   (tenant_id, site_id, budget_line_id, qty_done, reported_by, status)
 VALUES ($1, $2, $3, $4, $5, 'posted')
 RETURNING ${PROGRESS_COLUMNS}`;
+const LIST_ASSETS_SQL = `SELECT ${ASSET_COLUMNS}
+FROM assets WHERE tenant_id = $1 AND org_node_id = ANY($2::uuid[])
+ORDER BY code LIMIT ${OBRA_RESOURCE_LIST_LIMIT}`;
+const LIST_ITEMS_SQL = `SELECT ${ITEM_COLUMNS}
+FROM inventory_items WHERE tenant_id = $1
+ORDER BY sku LIMIT ${OBRA_RESOURCE_LIST_LIMIT}`;
+const LIST_MOVES_SQL = `SELECT ${MOVE_COLUMNS}
+FROM stock_moves WHERE tenant_id = $1 AND warehouse_node_id = ANY($2::uuid[])
+ORDER BY at DESC LIMIT ${OBRA_RESOURCE_LIST_LIMIT}`;
 const LIST_PROGRESS_SQL = `SELECT ${PROGRESS_COLUMNS}
 FROM progress_entries WHERE tenant_id = $1 AND site_id = $2
 ORDER BY at DESC LIMIT ${OBRA_LIST_LIMIT}`;
@@ -1052,6 +1061,24 @@ export async function recordReading(
   return reading;
 }
 
+/**
+ * Equipment units inside the membership subtree, ordered by code and capped
+ * at `OBRA_RESOURCE_LIST_LIMIT`. Same read contract as `listSites`: the
+ * central rule (`site.read` at the membership node) owns the denial audit
+ * and a successful read writes no audit row — reads are not writes (§4.4).
+ */
+export async function listAssets(actor: ObraActorContext): Promise<AssetRecord[]> {
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    action: 'site.read',
+    entity: 'asset',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'asset.list',
+  });
+  const result = await actor.client.query(LIST_ASSETS_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
+  return readRows(result).map(mapAsset);
+}
+
 // ============ warehouse stock ============
 
 interface ItemCreateInput {
@@ -1244,6 +1271,43 @@ export async function reverseMove(
     diff: { itemId: reversed.itemId, kind: reversed.kind, qty: reversed.qty, from: 'posted', to: 'reversed' },
   });
   return reversed;
+}
+
+/**
+ * Warehouse items of the tenant, ordered by sku and capped at
+ * `OBRA_RESOURCE_LIST_LIMIT`. `inventory_items` carries no org column, so
+ * there is no subtree to filter by: the guard (`site.read`, every
+ * construction role holds it) owns the denial audit and a successful read
+ * writes no audit row — reads are not writes (§4.4).
+ */
+export async function listItems(actor: ObraActorContext): Promise<InventoryItemRecord[]> {
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    action: 'site.read',
+    entity: 'inventory_item',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'item.list',
+  });
+  const result = await actor.client.query(LIST_ITEMS_SQL, [actor.tenantId]);
+  return readRows(result).map(mapItem);
+}
+
+/**
+ * Stock moves booked against warehouses inside the membership subtree, newest
+ * first and capped at `OBRA_RESOURCE_LIST_LIMIT`. Same read contract as
+ * `listInvoices`: the guard (`site.read` at the membership node) owns the
+ * denial audit and a successful read writes no audit row.
+ */
+export async function listMoves(actor: ObraActorContext): Promise<StockMoveRecord[]> {
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    action: 'site.read',
+    entity: 'stock_move',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'stock.move.list',
+  });
+  const result = await actor.client.query(LIST_MOVES_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
+  return readRows(result).map(mapMove);
 }
 
 // ============ budget, progress and milestones ============

@@ -2,16 +2,24 @@
 
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
-import type { CashSessionRecord, InvoiceRecord } from '@rizoma/contracts';
+import {
+  INVOICE_STATUSES,
+  invoiceListSchema,
+  type CashSessionRecord,
+  type InvoiceRecord,
+} from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
+import { SkeletonRows } from '@/components/ui/skeleton';
 import { CashSessionPanel } from '@/components/salud/cash-session-panel';
 import { InvoiceDetailPanel } from '@/components/salud/invoice-detail-panel';
 import { InvoiceIssueForm, type InvoiceDraftSeed } from '@/components/salud/invoice-issue-form';
 import { QuotesPanel } from '@/components/salud/quotes-panel';
-import { EmptyState } from '@/components/salud/states';
+import { EmptyState, FailurePanel } from '@/components/salud/states';
+import { requestJson } from '@/lib/api-client';
 import { DEV_IDENTITY } from '@/lib/config';
 import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
 import {
@@ -21,7 +29,8 @@ import {
   invoiceStatusLabel,
   invoiceStatusVariant,
 } from '@/lib/labels';
-import { mergeInvoice } from '@/lib/salud-select';
+import { mergeInvoice, PAGE_SIZE, paginate } from '@/lib/salud-select';
+import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
 
 /**
@@ -35,20 +44,52 @@ import { cn } from '@/lib/utils';
  * one arrived, because `@rizoma/contracts` drops anything the API did not
  * declare.
  *
- * One honest limitation, stated in the UI: MVP1 has **no invoice list endpoint**
- * (`GET /billing/invoices/:id` is the only read), so the panel keeps the
- * documents issued in this session and lets an operator open any other one by
- * identifier. The API is the authority for both; the list is a convenience of
- * the session, not a second source of truth.
+ * The invoice list is server-backed: `GET /billing/invoices` answers the scope
+ * capped at 200 rows with optional shift/status/date filters, and this screen
+ * sends exactly the filters the operator sets. A freshly issued or updated
+ * document is merged into the visible rows and the next read reconciles the
+ * view with the API; any other document still opens by identifier. The API is
+ * the authority for both.
  */
 export interface CajaBoardProps {
   readonly role: string | null;
   readonly className?: string;
 }
 
+/** Filters of the invoice list; every field empty means "no filter". */
+interface InvoiceFilters {
+  readonly cashSession: string;
+  readonly status: string;
+  readonly from: string;
+  readonly to: string;
+}
+
+const EMPTY_INVOICE_FILTERS: InvoiceFilters = { cashSession: '', status: '', from: '', to: '' };
+
+/** Path of `GET /v1/billing/invoices` with exactly the filters the user set. */
+function invoicesPath(filters: InvoiceFilters): string {
+  const params = new URLSearchParams();
+  if (filters.cashSession.trim() !== '') params.set('cashSession', filters.cashSession.trim());
+  if (filters.status !== '') params.set('status', filters.status);
+  if (filters.from !== '') params.set('from', filters.from);
+  if (filters.to !== '') params.set('to', filters.to);
+  const query = params.toString();
+  return query === '' ? '/billing/invoices' : `/billing/invoices?${query}`;
+}
+
+/** Reads the invoice list through the proxy, validated by the billing contract. */
+async function readInvoices(
+  filters: InvoiceFilters,
+  signal: AbortSignal,
+): Promise<readonly InvoiceRecord[]> {
+  const rows = await requestJson(invoicesPath(filters), invoiceListSchema, { signal });
+  return rows ?? [];
+}
+
 export function CajaBoard({ role, className }: CajaBoardProps) {
   const [session, setSession] = useState<CashSessionRecord | null>(null);
-  const [issued, setIssued] = useState<readonly InvoiceRecord[]>([]);
+  const [filters, setFilters] = useState<InvoiceFilters>(EMPTY_INVOICE_FILTERS);
+  const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [lookup, setLookup] = useState('');
   const [seed, setSeed] = useState<InvoiceDraftSeed | null>(null);
@@ -57,10 +98,30 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
   // development value. Every form also remembers the last real row it read.
   const defaultOrgNodeId = session?.orgNodeId ?? DEV_IDENTITY.orgNodeId;
 
-  const selected = useMemo(
-    () => issued.find((invoice) => invoice.id === selectedId) ?? null,
-    [issued, selectedId],
+  const filterKey = `${filters.cashSession.trim()}|${filters.status}|${filters.from}|${filters.to}`;
+  const invoices = useResource<readonly InvoiceRecord[]>(`invoices:${filterKey}`, (signal) =>
+    readInvoices(filters, signal),
   );
+  const rows = invoices.data ?? [];
+  const current = useMemo(() => paginate(rows, page), [rows, page]);
+
+  const selected = useMemo(
+    () => rows.find((invoice) => invoice.id === selectedId) ?? null,
+    [rows, selectedId],
+  );
+
+  function updateFilters(next: InvoiceFilters): void {
+    setFilters(next);
+    setPage(1);
+  }
+
+  // A freshly issued or updated document joins the visible rows at once; the
+  // silent reload reconciles the view with the API (a row a filter excludes
+  // leaves on that read). The detail by identifier stays available regardless.
+  function handleInvoiceChanged(invoice: InvoiceRecord): void {
+    invoices.setData((existing) => mergeInvoice(existing, invoice));
+    invoices.reloadSilently();
+  }
 
   return (
     <div className={cn('flex flex-col gap-6', className)}>
@@ -78,7 +139,7 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
         defaultOrgNodeId={defaultOrgNodeId}
         cashSessionId={session?.status === 'open' ? session.id : null}
         onIssued={(invoice) => {
-          setIssued((current) => mergeInvoice(current, invoice));
+          handleInvoiceChanged(invoice);
           setSelectedId(invoice.id);
           setSeed(null);
         }}
@@ -86,17 +147,110 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
 
       <Card>
         <CardHeader>
-          <CardEyebrow>Comprobantes de la sesión</CardEyebrow>
-          <CardTitle as="h2">Emitidos en esta sesión</CardTitle>
+          <CardEyebrow>Comprobantes</CardEyebrow>
+          <CardTitle as="h2">Comprobantes del alcance</CardTitle>
           <CardDescription>
-            El estado fiscal <span className="font-medium">pendiente</span> se muestra en cada fila:
-            un comprobante emitido no es un comprobante aceptado por el adaptador. MVP1 no expone un
-            listado de comprobantes, así que aquí quedan los emitidos desde esta pantalla y cualquier
-            otro se abre por su identificador.
+            La lista la responde <span className="font-mono">GET /v1/billing/invoices</span> (hasta
+            200 filas por respuesta y sin cursor en MVP1): los filtros viajan al API y el paginador
+            indica cuántas de la página cargada se están mostrando. El estado fiscal{' '}
+            <span className="font-medium">pendiente</span> se muestra en cada fila: un comprobante
+            emitido no es un comprobante aceptado por el adaptador.
           </CardDescription>
         </CardHeader>
 
         <CardContent className="flex flex-col gap-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="invoice-filter-session" className="text-[0.8125rem] font-medium">
+                Turno de caja
+              </label>
+              <Input
+                id="invoice-filter-session"
+                className="font-mono text-xs"
+                spellCheck={false}
+                placeholder="UUID del turno (vacío: todos)"
+                value={filters.cashSession}
+                onChange={(event) => updateFilters({ ...filters, cashSession: event.target.value })}
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="invoice-filter-status" className="text-[0.8125rem] font-medium">
+                Estado comercial
+              </label>
+              <Select
+                id="invoice-filter-status"
+                value={filters.status}
+                onChange={(event) => updateFilters({ ...filters, status: event.target.value })}
+              >
+                <option value="">Todos</option>
+                {INVOICE_STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {invoiceStatusLabel(status)}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="invoice-filter-from" className="text-[0.8125rem] font-medium">
+                Emitidos desde
+              </label>
+              <Input
+                id="invoice-filter-from"
+                type="date"
+                value={filters.from}
+                onChange={(event) => updateFilters({ ...filters, from: event.target.value })}
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="invoice-filter-to" className="text-[0.8125rem] font-medium">
+                Emitidos hasta
+              </label>
+              <Input
+                id="invoice-filter-to"
+                type="date"
+                value={filters.to}
+                onChange={(event) => updateFilters({ ...filters, to: event.target.value })}
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="tabular text-xs text-muted-foreground">
+              {invoices.loading
+                ? 'leyendo…'
+                : `${current.from}–${current.to} de ${current.total} comprobantes`}
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              {session?.status === 'open' ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => updateFilters({ ...filters, cashSession: session.id })}
+                >
+                  Ver turno actual
+                </Button>
+              ) : null}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => updateFilters(EMPTY_INVOICE_FILTERS)}
+              >
+                Limpiar filtros
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={invoices.reload}
+                disabled={invoices.loading}
+              >
+                Actualizar
+              </Button>
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center gap-3">
             <label htmlFor="invoice-lookup" className="sr-only">
               Identificador del comprobante
@@ -125,15 +279,27 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
             </Link>
           </div>
 
-          {issued.length === 0 ? (
-            <EmptyState
-              eyebrow="Sin comprobantes en la sesión"
-              title="Todavía no emitió comprobantes"
-              description="Emita el primero con el formulario de arriba, o abra un comprobante existente con su identificador. El detalle muestra el par fiscal y los cobros registrados."
+          {invoices.loading ? <SkeletonRows rows={4} /> : null}
+
+          {!invoices.loading && invoices.failure !== null ? (
+            <FailurePanel
+              title="No se pudieron leer los comprobantes"
+              failure={invoices.failure}
+              onRetry={invoices.reload}
             />
-          ) : (
+          ) : null}
+
+          {!invoices.loading && invoices.failure === null && rows.length === 0 ? (
+            <EmptyState
+              eyebrow="Sin comprobantes"
+              title="El alcance no tiene comprobantes con esos filtros"
+              description="Emita el primero con el formulario de arriba, limpie los filtros, o abra un comprobante existente con su identificador. El detalle muestra el par fiscal y los cobros registrados."
+            />
+          ) : null}
+
+          {rows.length === 0 ? null : (
             <ul className="flex flex-col">
-              {issued.map((invoice) => (
+              {current.items.map((invoice: InvoiceRecord) => (
                 <li
                   key={invoice.id}
                   className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3.5 last:border-b-0"
@@ -168,6 +334,30 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
               ))}
             </ul>
           )}
+
+          {current.pageCount > 1 ? (
+            <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={current.page <= 1}
+                onClick={() => setPage(current.page - 1)}
+              >
+                Anterior
+              </Button>
+              <span className="tabular text-xs text-muted-foreground">
+                Página {current.page} de {current.pageCount} · {PAGE_SIZE} filas por página
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={current.page >= current.pageCount}
+                onClick={() => setPage(current.page + 1)}
+              >
+                Siguiente
+              </Button>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -180,10 +370,7 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
               envelope.
             </p>
           ) : null}
-          <InvoiceDetailPanel
-            invoiceId={selectedId}
-            onUpdated={(invoice) => setIssued((current) => mergeInvoice(current, invoice))}
-          />
+          <InvoiceDetailPanel invoiceId={selectedId} onUpdated={handleInvoiceChanged} />
         </>
       )}
 

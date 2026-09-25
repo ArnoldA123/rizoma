@@ -278,3 +278,97 @@ export const consentSignInputSchema = z.object({
   evidenceMime: z.string().min(1).optional(),
 });
 export type ConsentSignInput = z.infer<typeof consentSignInputSchema>;
+
+// ============ triages (insert-only vital signs, §2.3) ============
+//
+// Migration 003 declares `triages` with no state machine: a correction is a new
+// row, never an UPDATE or DELETE, so the API exposes only GET (history) and
+// POST (record). `episode_id` is nullable — a triage may be taken before any
+// episode is opened — while `values` is the free-form vital-signs bag and `at`
+// the moment the signs were taken (server clock when omitted).
+
+/** `GET /v1/salud/triages?patient=` — one recorded vital-signs row. */
+export const triageRecordSchema = z.object({
+  id: uuidSchema,
+  tenantId: uuidSchema,
+  patientId: uuidSchema,
+  /** Nullable: a triage may precede the first episode of the patient. */
+  episodeId: uuidSchema.nullable(),
+  /** User that recorded the signs; the API takes it from the session. */
+  recordedBy: uuidSchema,
+  /** Vital-signs bag (systolic, heart rate, temperature, …). */
+  values: jsonObjectSchema,
+  /** When the signs were taken; never omitted, `null` only when unread. */
+  at: isoValueSchema,
+});
+
+export type TriageRecord = z.infer<typeof triageRecordSchema>;
+
+/** `GET /v1/salud/triages?patient=` — up to 200 rows, most recent first. */
+export const triageListSchema = z.array(triageRecordSchema);
+export type TriageList = z.infer<typeof triageListSchema>;
+
+/** Body of `POST /v1/salud/triages` — insert-only, no update surface. */
+export const triageCreateInputSchema = z.object({
+  patientId: uuidSchema,
+  /** Optional episode the triage belongs to; must belong to the patient. */
+  episodeId: uuidSchema.nullable().optional(),
+  /** At least one vital sign; an empty bag is a refused write, not a row. */
+  values: jsonObjectSchema.refine((values) => Object.keys(values).length > 0, {
+    message: 'values must carry at least one vital sign',
+  }),
+  /** Offset-aware ISO-8601 instant; omitted means the server clock. */
+  at: isoDateTimeSchema.optional(),
+});
+export type TriageCreateInput = z.infer<typeof triageCreateInputSchema>;
+
+// ============ prescriptions (template-based orders, §2.3) ============
+//
+// Migration 003 declares `prescriptions` with a `draft → issued` happy path and
+// `cancelled` as the terminal refusal. The API of this slice exposes only
+// GET (history) and POST (create as `draft` unless stated); later slices own
+// the transitions. The patient is derived from the episode server-side, so the
+// create body carries no `patientId` that could disagree with it.
+
+/** `prescriptions.status` lifecycle (migration 003 CHECK). */
+export const PRESCRIPTION_STATUSES = ['draft', 'issued', 'cancelled'] as const;
+export const prescriptionStatusSchema = z.enum(PRESCRIPTION_STATUSES);
+export type PrescriptionStatus = z.infer<typeof prescriptionStatusSchema>;
+
+/** One ordered line: what to dispense or apply, and how. */
+export const prescriptionItemSchema = z.object({
+  description: z.string().trim().min(1),
+  quantity: z.number().int().positive().optional(),
+  dose: z.string().trim().min(1).optional(),
+  frequency: z.string().trim().min(1).optional(),
+  instructions: z.string().trim().optional(),
+});
+export type PrescriptionItem = z.infer<typeof prescriptionItemSchema>;
+
+/** `GET /v1/salud/prescriptions` — one prescription order. */
+export const prescriptionRecordSchema = z.object({
+  id: uuidSchema,
+  tenantId: uuidSchema,
+  patientId: uuidSchema,
+  episodeId: uuidSchema,
+  templateCode: z.string(),
+  items: z.array(prescriptionItemSchema),
+  status: prescriptionStatusSchema,
+});
+
+export type PrescriptionRecord = z.infer<typeof prescriptionRecordSchema>;
+
+/** `GET /v1/salud/prescriptions` — up to 200 orders of the filter. */
+export const prescriptionListSchema = z.array(prescriptionRecordSchema);
+export type PrescriptionList = z.infer<typeof prescriptionListSchema>;
+
+/** Body of `POST /v1/salud/prescriptions` — the patient comes from the episode. */
+export const prescriptionCreateInputSchema = z.object({
+  episodeId: uuidSchema,
+  templateCode: z.string().trim().min(1).max(120),
+  /** At least one line: an empty order is a refused write, not a row. */
+  items: z.array(prescriptionItemSchema).min(1).max(100),
+  /** Omitted means `draft`; the transitions arrive in a later slice. */
+  status: prescriptionStatusSchema.optional(),
+});
+export type PrescriptionCreateInput = z.infer<typeof prescriptionCreateInputSchema>;

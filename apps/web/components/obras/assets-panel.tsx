@@ -23,17 +23,20 @@ import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle 
 import { LiveField } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { WriteResult } from '@/components/ui/states';
+import { Skeleton } from '@/components/ui/skeleton';
+import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { formatUtcStamp } from '@/lib/format';
 import { assetStatusLabel, assetStatusVariant } from '@/lib/labels';
 import {
   addAssetReading,
   assignAsset,
+  listAssets,
   registerAsset,
   retireAsset,
   setAssetMaintenance,
 } from '@/lib/obras-api';
+import { useResource } from '@/lib/use-resource';
 
 /**
  * Equipos: registrar una unidad, asignarla a esta obra, enviarla a mantenimiento,
@@ -55,10 +58,10 @@ import {
  *      subtree already covers the site. That is why the action is offered under
  *      `canMark` and not under `site.write`.
  *
- * MVP1 exposes no asset *list* endpoint, so there is no table here. The target
- * field is shared with the obra board — the only place the API hands asset ids
- * back — and the panel states the absence instead of rendering an empty list
- * that would read as «no hay equipos».
+ * The table reads the scoped list (`GET /v1/obras/assets`, capped at 200
+ * rows). The target field is shared with the obra board and with the table
+ * itself: choosing a row fills the same UUID the transitions operate on, so
+ * the board pick stays as a shortcut rather than the only source of ids.
  *
  * The primary control is a plain `Button variant="primary"` on purpose: the
  * design steer allows one magnetic CTA per screen, and on the ficha that one
@@ -120,6 +123,18 @@ export function AssetsPanel({
   /** Last unit this panel wrote, so the confirmation can state its open transitions. */
   const [lastAsset, setLastAsset] = useState<AssetRecord | null>(null);
 
+  /** Scoped catalogue: units inside the membership subtree, capped at 200. */
+  const catalogue = useResource<AssetRecord[]>('obras-assets', (signal) => listAssets(signal));
+  const rows = useMemo(() => {
+    const all = catalogue.data ?? [];
+    return [...all].sort((a, b) => {
+      const aHere = a.currentSiteId === siteId ? 0 : 1;
+      const bHere = b.currentSiteId === siteId ? 0 : 1;
+      if (aHere !== bHere) return aHere - bHere;
+      return a.code.localeCompare(b.code);
+    });
+  }, [catalogue.data, siteId]);
+
   const registerChecks: Readonly<Record<string, FieldCheck>> = useMemo(
     () => ({
       orgNodeId: checkUuidField('orgNodeId', register.orgNodeId),
@@ -157,6 +172,7 @@ export function AssetsPanel({
     try {
       const asset = await operation();
       setLastAsset(asset);
+      catalogue.reloadSilently();
       setSuccess(describe(asset));
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -179,6 +195,7 @@ export function AssetsPanel({
         serial: register.serial.trim(),
       });
       setLastAsset(asset);
+      catalogue.reloadSilently();
       onAssetIdChange(asset.id);
       setRegister((current) => ({ ...current, code: '', kind: '', serial: '' }));
       setTouched({});
@@ -226,12 +243,79 @@ export function AssetsPanel({
         <CardTitle as="h2">Unidad de equipo</CardTitle>
         <CardDescription>
           Registrar, asignar, enviar a mantenimiento, retirar y anotar lecturas manuales de horómetro.
-          El API no expone un listado de equipos en MVP1: la unidad se identifica por su UUID, y el
-          tablero de esta obra —que sí devuelve identificadores de equipos— permite elegirla con un clic.
+          La tabla lista los equipos del alcance de su organización (máximo 200 filas): elegir una
+          fila llena la unidad objetivo, igual que elegirla en el tablero de la obra.
         </CardDescription>
       </CardHeader>
 
       <CardContent className="flex flex-col gap-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[0.8125rem] font-medium">Equipos del alcance</span>
+          <span className="tabular ml-auto text-xs text-muted-foreground">
+            {catalogue.loading ? 'leyendo…' : `${rows.length} unidades`}
+          </span>
+          <Button variant="ghost" size="sm" onClick={catalogue.reload} disabled={catalogue.loading}>
+            Actualizar
+          </Button>
+        </div>
+
+        {catalogue.loading ? <AssetsSkeleton /> : null}
+
+        {!catalogue.loading && catalogue.failure !== null ? (
+          <FailurePanel
+            title="No se pudo leer los equipos del alcance"
+            failure={catalogue.failure}
+            onRetry={catalogue.reload}
+          />
+        ) : null}
+
+        {!catalogue.loading && catalogue.failure === null && rows.length === 0 ? (
+          <EmptyState
+            eyebrow="Sin equipos"
+            title="No hay unidades en su alcance"
+            description="El API respondió con una lista válida y vacía. La primera unidad se registra con el formulario de abajo; el código es único en el tenant."
+          />
+        ) : null}
+
+        {!catalogue.loading && catalogue.failure === null && rows.length > 0 ? (
+          <ul className="flex flex-col">
+            {rows.map((row) => (
+              <li
+                key={row.id}
+                className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3 last:border-b-0"
+              >
+                <div className="flex min-w-0 flex-col gap-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={assetStatusVariant(row.status)}>
+                      {assetStatusLabel(row.status)}
+                    </Badge>
+                    <span className="tabular text-[0.8125rem] font-medium">{row.code}</span>
+                    <span className="text-xs text-muted-foreground">{row.kind}</span>
+                    {row.currentSiteId === siteId ? (
+                      <Badge variant="outline">esta obra</Badge>
+                    ) : null}
+                  </div>
+                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                    unidad {row.id} · serie {row.serial}
+                    {row.currentSiteId === null ? '' : ` · obra ${row.currentSiteId}`}
+                  </span>
+                </div>
+                <Button
+                  variant={assetId === row.id ? 'primary' : 'outline'}
+                  size="sm"
+                  disabled={assetId === row.id}
+                  onClick={() => {
+                    onAssetIdChange(row.id);
+                    setSuccess(null);
+                  }}
+                >
+                  {assetId === row.id ? 'Elegida' : 'Elegir'}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
         {canWrite ? (
           <form className="flex flex-col gap-4" onSubmit={handleRegister} noValidate>
             <p className="text-xs text-muted-foreground">
@@ -320,7 +404,7 @@ export function AssetsPanel({
             label="Unidad objetivo (UUID)"
             issue={targetIssue}
             touched={show('assetId') || assetId !== ''}
-            hint="Se completa al elegir un equipo en el tablero de la obra."
+            hint="Se completa al elegir una fila de la tabla o un equipo en el tablero de la obra."
           >
             <Input
               id="asset-target"
@@ -465,5 +549,19 @@ export function AssetsPanel({
         <WriteResult failure={failure} success={success} />
       </CardContent>
     </Card>
+  );
+}
+
+function AssetsSkeleton() {
+  return (
+    <ul aria-hidden className="flex flex-col">
+      {[0, 1].map((index) => (
+        <li key={index} className="flex flex-col gap-2 border-b border-border py-3 last:border-b-0">
+          <Skeleton className="ob-shimmer h-3 w-40" delay={index * 90} />
+          <Skeleton className="ob-shimmer h-3 w-full max-w-xl" delay={index * 90 + 60} />
+          <Skeleton className="ob-shimmer h-2.5 w-56" delay={index * 90 + 120} />
+        </li>
+      ))}
+    </ul>
   );
 }

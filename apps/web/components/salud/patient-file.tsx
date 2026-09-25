@@ -10,6 +10,8 @@ import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle 
 import { Skeleton, SkeletonRows } from '@/components/ui/skeleton';
 import { ConsentsPanel } from '@/components/salud/consents-panel';
 import { EpisodesPanel } from '@/components/salud/episodes-panel';
+import { PrescriptionsPanel } from '@/components/salud/prescriptions-panel';
+import { TriagesPanel } from '@/components/salud/triages-panel';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { IconAlertTriangle, IconArrowRight } from '@/components/ui/icons';
 import { documentTypeLabel, appointmentStatusLabel, appointmentStatusVariant, roleLabel } from '@/lib/labels';
@@ -23,12 +25,12 @@ import { cn } from '@/lib/utils';
 /**
  * `/salud/pacientes/[id]` — the ficha 360.
  *
- * The screen is the composition of the four things a patient file is made of,
+ * The screen is the composition of the six things a patient file is made of,
  * plus one deliberate omission:
  *   - the header, where allergies and alerts are rendered *above* every clinical
  *     action (a file that hides an allergy behind a tab is a safety defect);
- *   - the episodes and consents panels, each owning its own request and its own
- *     writes;
+ *   - the episodes, triage, prescription and consent panels, each owning its own
+ *     request and its own writes;
  *   - the appointments of the patient, filtered **in the browser** because
  *     `GET /v1/salud/appointments` lists the agenda of the sede and takes no
  *     `?patient=` parameter;
@@ -195,6 +197,14 @@ export function PatientFile({
       </Card>
 
       <EpisodesPanel patientId={record.id} canWrite={canEpisodeWrite} resource={episodes} />
+
+      <TriagesPanel patientId={record.id} episodes={episodes.data ?? []} canWrite={canWrite} />
+
+      <PrescriptionsPanel
+        patientId={record.id}
+        episodes={episodes.data ?? []}
+        canWrite={canEpisodeWrite}
+      />
 
       <ConsentsPanel
         patientId={record.id}

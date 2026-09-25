@@ -24,11 +24,19 @@ import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle 
 import { LiveField } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { EmptyState, WriteResult } from '@/components/ui/states';
+import { Skeleton } from '@/components/ui/skeleton';
+import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { formatQuantity, formatUtcStamp } from '@/lib/format';
 import { stockMoveKindLabel, stockMoveStatusLabel, stockMoveStatusVariant } from '@/lib/labels';
-import { createStockItem, postStockMove, reverseStockMove } from '@/lib/obras-api';
+import {
+  createStockItem,
+  listInventoryItems,
+  listStockMoves,
+  postStockMove,
+  reverseStockMove,
+} from '@/lib/obras-api';
+import { useResource } from '@/lib/use-resource';
 
 /**
  * Stock: ítems de almacén, movimientos contabilizados y su reversa.
@@ -39,9 +47,9 @@ import { createStockItem, postStockMove, reverseStockMove } from '@/lib/obras-ap
  * item's posted quantity the moment it is written — no approval step in between.
  * The panel therefore does two things after a move:
  *
- *   1. it appends the move to a **session ledger** (the API exposes no list of
- *      moves in MVP1, and inventing a table with rows a refresh would lose would
- *      be worse than a short, honest ledger of what this screen wrote);
+ *   1. it re-reads the scoped lists silently (`GET /v1/obras/stock/items` and
+ *      `GET /v1/obras/stock/moves`, each capped at 200 rows), so the new row
+ *      appears in the tables below without losing the screen's place;
  *   2. it asks the obra board to re-read silently (`onStockChanged`), so the
  *      decrement shows up in «Stock crítico» without waiting for the 10-minute
  *      poll. An item that stays above its minimum will not appear there at all,
@@ -93,8 +101,26 @@ export function StockPanel({
 }: StockPanelProps) {
   const [item, setItem] = useState<ItemDraft>(EMPTY_ITEM);
   const [move, setMove] = useState<MoveDraft>(EMPTY_MOVE);
-  const [moves, setMoves] = useState<readonly StockMoveRecord[]>([]);
   const [lastItem, setLastItem] = useState<InventoryItemRecord | null>(null);
+
+  /** Scoped lists: tenant items and the moves of subtree warehouses. */
+  const catalogue = useResource<InventoryItemRecord[]>('obras-stock-items', (signal) =>
+    listInventoryItems(signal),
+  );
+  const ledger = useResource<StockMoveRecord[]>('obras-stock-moves', (signal) =>
+    listStockMoves(signal),
+  );
+  const catalogueRows = catalogue.data ?? [];
+  const ledgerRows = ledger.data ?? [];
+  /** Moves of the picked item first, so the board shortcut reads as a filter. */
+  const orderedMoves = useMemo(() => {
+    if (itemId === '') return ledgerRows;
+    return [...ledgerRows].sort((a, b) => {
+      const aPicked = a.itemId === itemId ? 0 : 1;
+      const bPicked = b.itemId === itemId ? 0 : 1;
+      return aPicked - bPicked;
+    });
+  }, [ledgerRows, itemId]);
   const [touched, setTouched] = useState<Readonly<Record<string, boolean>>>({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -146,6 +172,7 @@ export function StockPanel({
         minStock: minStock === '' ? 0 : Number(minStock),
       });
       setLastItem(created);
+      catalogue.reloadSilently();
       onItemIdChange(created.id);
       setItem(EMPTY_ITEM);
       setTouched({});
@@ -176,7 +203,7 @@ export function StockPanel({
         qty: Number(move.qty.trim()),
         kind: move.kind,
       });
-      setMoves((current) => [created, ...current]);
+      ledger.reloadSilently();
       setMove((current) => ({ ...current, qty: '' }));
       setTouched({});
       setSubmitted(false);
@@ -198,7 +225,7 @@ export function StockPanel({
     setSaving(true);
     try {
       const reversed = await reverseStockMove(row.id);
-      setMoves((current) => current.map((entry) => (entry.id === reversed.id ? reversed : entry)));
+      ledger.reloadSilently();
       onStockChanged();
       setSuccess(
         `Movimiento revertido (${stockMoveStatusLabel(reversed.status)}). La fila original no se borra: queda con estado «Revertido», que es lo que devuelve la cantidad al almacén.`,
@@ -299,7 +326,7 @@ export function StockPanel({
                 label="Ítem (UUID)"
                 issue={moveChecks.itemId ?? null}
                 touched={show('itemId') || itemId !== ''}
-                hint="Se completa al elegir un ítem del stock crítico del tablero."
+                hint="Se completa al elegir una fila de la tabla o un ítem del stock crítico del tablero."
               >
                 <Input
                   id="move-item"
@@ -381,58 +408,162 @@ export function StockPanel({
           </p>
         )}
 
-        <p className="tabular text-xs text-muted-foreground">
-          Cuaderno de esta sesión{lastItem === null ? '' : ` (último ítem creado: ${lastItem.sku})`}:
-          el API no expone un listado de movimientos en MVP1, así que aquí solo figura lo que esta
-          pantalla escribió y el cuaderno se reinicia al recargar. El stock disponible real lo reporta
-          el tablero.
-        </p>
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[0.8125rem] font-medium">Ítems del almacén</span>
+            <span className="tabular ml-auto text-xs text-muted-foreground">
+              {catalogue.loading ? 'leyendo…' : `${catalogueRows.length} ítems`}
+            </span>
+            <Button variant="ghost" size="sm" onClick={catalogue.reload} disabled={catalogue.loading}>
+              Actualizar
+            </Button>
+          </div>
 
-        {moves.length === 0 ? (
-          <EmptyState
-            eyebrow="Sin movimientos"
-            title="Todavía no registró movimientos en esta sesión"
-            description="El cuaderno se llena con los movimientos que escribe esta pantalla y se reinicia al recargar: no es una lista del servidor. El stock crítico del tablero es la lectura que el API sí devuelve."
-          />
-        ) : (
-          <ul className="flex flex-col">
-            {moves.map((row) => (
-              <li
-                key={row.id}
-                className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3 last:border-b-0"
-              >
-                <div className="flex min-w-0 flex-col gap-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="outline">{stockMoveKindLabel(row.kind)}</Badge>
-                    <Badge variant={stockMoveStatusVariant(row.status)}>
-                      {stockMoveStatusLabel(row.status)}
-                    </Badge>
-                    <span className="tabular text-[0.8125rem] font-medium">
-                      {stockMoveSignedQty(row) > 0 ? '+' : ''}
-                      {formatQuantity(stockMoveSignedQty(row))}
+          {catalogue.loading ? <StockSkeleton /> : null}
+
+          {!catalogue.loading && catalogue.failure !== null ? (
+            <FailurePanel
+              title="No se pudo leer los ítems del almacén"
+              failure={catalogue.failure}
+              onRetry={catalogue.reload}
+            />
+          ) : null}
+
+          {!catalogue.loading && catalogue.failure === null && catalogueRows.length === 0 ? (
+            <EmptyState
+              eyebrow="Sin ítems"
+              title="El almacén no tiene ítems"
+              description={lastItem === null
+                ? 'El API respondió con una lista válida y vacía. El primer ítem se crea con el formulario de arriba; el SKU es único en el tenant.'
+                : `El último ítem creado fue ${lastItem.sku}: la lista se relee sola después de cada alta.`}
+            />
+          ) : null}
+
+          {!catalogue.loading && catalogue.failure === null && catalogueRows.length > 0 ? (
+            <ul className="flex flex-col">
+              {catalogueRows.map((row) => (
+                <li
+                  key={row.id}
+                  className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3 last:border-b-0"
+                >
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="tabular text-[0.8125rem] font-medium">{row.sku}</span>
+                      <span className="text-xs text-muted-foreground">{row.name}</span>
+                      {itemId === row.id ? <Badge variant="outline">elegido</Badge> : null}
+                    </div>
+                    <span className="tabular text-xs text-muted-foreground">
+                      mínimo {formatQuantity(row.minStock)} {row.unit}
+                    </span>
+                    <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                      ítem {row.id}
                     </span>
                   </div>
-                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                    movimiento {row.id} · ítem {row.itemId}
-                    {row.siteId === null ? '' : ` · obra ${row.siteId}`} · {formatUtcStamp(row.at)}
-                  </span>
-                </div>
-                {canConsume && stockMoveCanBeReversed(row) ? (
-                  <Button variant="outline" size="sm" disabled={saving} onClick={() => void handleReverse(row)}>
-                    Revertir
+                  <Button
+                    variant={itemId === row.id ? 'primary' : 'outline'}
+                    size="sm"
+                    disabled={itemId === row.id}
+                    onClick={() => {
+                      onItemIdChange(row.id);
+                      setSuccess(null);
+                    }}
+                  >
+                    {itemId === row.id ? 'Elegido' : 'Elegir'}
                   </Button>
-                ) : row.status === 'reversed' ? (
-                  <span className="text-xs text-muted-foreground">
-                    revertido: un movimiento se revierte una sola vez
-                  </span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[0.8125rem] font-medium">Movimientos del alcance</span>
+            <span className="tabular ml-auto text-xs text-muted-foreground">
+              {ledger.loading ? 'leyendo…' : `${ledgerRows.length} movimientos`}
+            </span>
+            <Button variant="ghost" size="sm" onClick={ledger.reload} disabled={ledger.loading}>
+              Actualizar
+            </Button>
+          </div>
+          <p className="tabular text-xs text-muted-foreground">
+            Máximo 200 filas, las más recientes primero; al elegir un ítem sus movimientos suben
+            arriba. El stock disponible real lo reporta el tablero.
+          </p>
+
+          {ledger.loading ? <StockSkeleton /> : null}
+
+          {!ledger.loading && ledger.failure !== null ? (
+            <FailurePanel
+              title="No se pudo leer los movimientos del alcance"
+              failure={ledger.failure}
+              onRetry={ledger.reload}
+            />
+          ) : null}
+
+          {!ledger.loading && ledger.failure === null && ledgerRows.length === 0 ? (
+            <EmptyState
+              eyebrow="Sin movimientos"
+              title="Todavía no hay movimientos en el alcance"
+              description="El API respondió con una lista válida y vacía. El primer movimiento se registra con el formulario de arriba y nace contabilizado."
+            />
+          ) : null}
+
+          {!ledger.loading && ledger.failure === null && ledgerRows.length > 0 ? (
+            <ul className="flex flex-col">
+              {orderedMoves.map((row) => (
+                <li
+                  key={row.id}
+                  className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3 last:border-b-0"
+                >
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline">{stockMoveKindLabel(row.kind)}</Badge>
+                      <Badge variant={stockMoveStatusVariant(row.status)}>
+                        {stockMoveStatusLabel(row.status)}
+                      </Badge>
+                      <span className="tabular text-[0.8125rem] font-medium">
+                        {stockMoveSignedQty(row) > 0 ? '+' : ''}
+                        {formatQuantity(stockMoveSignedQty(row))}
+                      </span>
+                      {row.siteId === siteId ? <Badge variant="outline">esta obra</Badge> : null}
+                    </div>
+                    <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                      movimiento {row.id} · ítem {row.itemId}
+                      {row.siteId === null ? '' : ` · obra ${row.siteId}`} · {formatUtcStamp(row.at)}
+                    </span>
+                  </div>
+                  {canConsume && stockMoveCanBeReversed(row) ? (
+                    <Button variant="outline" size="sm" disabled={saving} onClick={() => void handleReverse(row)}>
+                      Revertir
+                    </Button>
+                  ) : row.status === 'reversed' ? (
+                    <span className="text-xs text-muted-foreground">
+                      revertido: un movimiento se revierte una sola vez
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
 
         <WriteResult failure={failure} success={success} />
       </CardContent>
     </Card>
+  );
+}
+
+function StockSkeleton() {
+  return (
+    <ul aria-hidden className="flex flex-col">
+      {[0, 1].map((index) => (
+        <li key={index} className="flex flex-col gap-2 border-b border-border py-3 last:border-b-0">
+          <Skeleton className="ob-shimmer h-3 w-40" delay={index * 90} />
+          <Skeleton className="ob-shimmer h-3 w-full max-w-xl" delay={index * 90 + 60} />
+          <Skeleton className="ob-shimmer h-2.5 w-56" delay={index * 90 + 120} />
+        </li>
+      ))}
+    </ul>
   );
 }

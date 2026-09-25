@@ -37,6 +37,10 @@ export const assetRecordSchema = z.object({
 
 export type AssetRecord = z.infer<typeof assetRecordSchema>;
 
+/** `GET /v1/obras/assets` — units inside the membership subtree, capped at 200. */
+export const assetListSchema = z.array(assetRecordSchema);
+export type AssetList = z.infer<typeof assetListSchema>;
+
 /** One manual reading (`asset_readings`, insert-only). */
 export const assetReadingRecordSchema = z.object({
   id: uuidSchema,
@@ -65,6 +69,10 @@ export const inventoryItemRecordSchema = z.object({
 
 export type InventoryItemRecord = z.infer<typeof inventoryItemRecordSchema>;
 
+/** `GET /v1/obras/stock/items` — tenant items, capped at 200 (no org column). */
+export const inventoryItemListSchema = z.array(inventoryItemRecordSchema);
+export type InventoryItemList = z.infer<typeof inventoryItemListSchema>;
+
 /** One warehouse move (`stock_moves`), posted in a single step. */
 export const stockMoveRecordSchema = z.object({
   id: uuidSchema,
@@ -83,6 +91,10 @@ export const stockMoveRecordSchema = z.object({
 });
 
 export type StockMoveRecord = z.infer<typeof stockMoveRecordSchema>;
+
+/** `GET /v1/obras/stock/moves` — moves of warehouses in the subtree, capped at 200. */
+export const stockMoveListSchema = z.array(stockMoveRecordSchema);
+export type StockMoveList = z.infer<typeof stockMoveListSchema>;
 
 /** One budget line of a site (`budget_lines`). */
 export const budgetLineRecordSchema = z.object({

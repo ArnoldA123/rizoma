@@ -27,6 +27,7 @@
 import {
   assetAssignInputSchema,
   assetCreateInputSchema,
+  assetListSchema,
   assetReadingInputSchema,
   assetReadingRecordSchema,
   assetRecordSchema,
@@ -41,6 +42,7 @@ import {
   budgetLineRecordSchema,
   companyBoardSchema,
   importJobRecordSchema,
+  inventoryItemListSchema,
   inventoryItemRecordSchema,
   itemCreateInputSchema,
   milestoneCreateInputSchema,
@@ -59,6 +61,7 @@ import {
   siteRecordSchema,
   siteStaffListSchema,
   stockMoveInputSchema,
+  stockMoveListSchema,
   stockMoveRecordSchema,
   workersImportInputSchema,
   type AssetAssignInput,
@@ -254,11 +257,17 @@ export function getCompanyBoard(signal?: AbortSignal): Promise<CompanyBoard> {
 
 // ============ equipment (assets) ============
 //
-// The vertical exposes no asset *list* endpoint in MVP1: units are registered,
-// transitioned and read by identifier. The ficha therefore offers one target
-// field shared with the board, which is the only place the API hands asset ids
-// back (`maintenanceAssets`), and says so instead of rendering an empty table
-// that would read as "no hay equipos".
+// The table below reads the scoped list: units inside the membership subtree,
+// capped at 200 rows. The board pick stays as a shortcut — choosing a row
+// fills the same target field the transitions operate on.
+
+/**
+ * `GET /v1/obras/assets` — units inside the membership subtree (`site.read`).
+ * The API answers a bare array capped at 200 rows, ordered by code.
+ */
+export function listAssets(signal?: AbortSignal): Promise<AssetRecord[]> {
+  return readList(`${BASE}/assets`, assetListSchema, signal);
+}
 
 /** `POST /v1/obras/assets` — registers an `available` unit (`site.write`). */
 export function registerAsset(input: AssetCreateInput): Promise<AssetRecord> {
@@ -310,6 +319,27 @@ export function addAssetReading(
 }
 
 // ============ warehouse stock ============
+//
+// The tables below read the scoped lists: tenant items and the moves booked
+// against subtree warehouses, each capped at 200 rows. The board pick stays
+// as a shortcut — choosing a row fills the same target field the move form
+// operates on.
+
+/**
+ * `GET /v1/obras/stock/items` — warehouse items (`site.read`). The API
+ * answers a bare array capped at 200 rows, ordered by sku.
+ */
+export function listInventoryItems(signal?: AbortSignal): Promise<InventoryItemRecord[]> {
+  return readList(`${BASE}/stock/items`, inventoryItemListSchema, signal);
+}
+
+/**
+ * `GET /v1/obras/stock/moves` — moves of subtree warehouses (`site.read`).
+ * The API answers a bare array capped at 200 rows, newest first.
+ */
+export function listStockMoves(signal?: AbortSignal): Promise<StockMoveRecord[]> {
+  return readList(`${BASE}/stock/moves`, stockMoveListSchema, signal);
+}
 
 /** `POST /v1/obras/stock/items` — creates a warehouse item (`stock.consume`). */
 export function createStockItem(input: ItemCreateInput): Promise<InventoryItemRecord> {

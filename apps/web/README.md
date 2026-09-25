@@ -334,21 +334,14 @@ falla como `api.contract_mismatch` en lugar de propagarse como datos incompletos
 
 Fuera de esta entrega, documentado para no confundirlo con un olvido:
 
-- **Triaje y receta.** No hay endpoints (`003_salud.sql` declara las tablas sin controlador): la UI
-  muestra estado «no disponible» con un marcador tipificado.
-- **Archivos.** Solo `files/paths.ts`; sin subida ni descarga con URL firmada. La bitácora y la
-  evidencia de consentimiento degradan a metadata (arriba).
-- **Onboarding HTTP.** El servicio existe sin controlador, así que la ruta `/onboarding` no se
-  expone en el web.
-- **Listado de comprobantes.** Sin `GET /v1/billing/invoices`: el listado de caja es de sesión y la
-  lectura es por identificador.
-- **Listas de equipos y de stock.** La vertical no expone listados: los identificadores llegan desde
-  el tablero de la obra (mantenimiento, stock crítico, hitos) y desde ahí se opera.
+- **Entregado en MVP2 Huecos (H1–H6).** Triaje y receta tienen endpoints y paneles en la ficha
+  360; archivos con subida/descarga por URL firmada (TTL ≤5 min); onboarding por HTTP con wizard
+  en `/onboarding`; `GET /v1/billing/invoices` con filtros; listados de equipos, ítems y
+  movimientos de stock con tablas en la ficha de obra; y refresco lazy de token con segunda
+  cookie `HttpOnly` (ver `odd/tasks/mvp2-huecos.md`).
 - **Paginación por cursor, OpenAPI generado y caché Redis en tableros.** El API capa las listas a 200
   filas y el web pagina en el navegador; los tableros usan la caché de cliente descrita arriba.
 - **Webhooks, claves de API públicas, BI completa, builder de flujos, WhatsApp/SMS plenos.** No
   entran en el MVP1.
-- **Refresco de token.** La sesión dura 8 horas; al vencer, el middleware redirige a `/login`. El
-  `refresh_token` se guarda pero todavía no se usa.
 - **Sin E2E de navegador.** No se instaló Playwright ni ningún runner de navegador; la cobertura de
   interfaz es estática (probe) y de lógica pura (`node --test`).

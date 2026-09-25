@@ -106,6 +106,14 @@ export type InvoiceWithFiscal = z.infer<typeof invoiceWithFiscalSchema>;
 export const quoteListSchema = z.array(quoteRecordSchema);
 export type QuoteList = z.infer<typeof quoteListSchema>;
 
+/**
+ * `GET /v1/billing/invoices` — bare array capped at `BILLING_LIST_LIMIT` (200),
+ * newest first. Same envelope as the quotes list: no cursor in MVP1, so the
+ * screen paginates in the browser.
+ */
+export const invoiceListSchema = z.array(invoiceRecordSchema);
+export type InvoiceList = z.infer<typeof invoiceListSchema>;
+
 // ============ state catalogs ============
 //
 // Transcribed from the CHECK constraints of `db/migrations/004_facturacion.sql`,
@@ -122,6 +130,21 @@ export const INVOICE_STATUSES = ['draft', 'issued', 'partially_paid', 'paid', 'v
 /** `invoices.fiscal_status` — the fiscal axis, independent of the commercial one.
  */
 export const FISCAL_STATUSES = ['pending', 'sent', 'accepted', 'rejected', 'contingency'] as const;
+
+/**
+ * Query filters of `GET /v1/billing/invoices`, field-for-field what the service
+ * parser (`parseInvoiceListFilters` in `billing.service.ts`) accepts: the cash
+ * shift the document belongs to, the commercial status, and an emission window
+ * over `COALESCE(issued_at, created_at)`. Every field is optional and an empty
+ * string counts as absent, so the screen sends only the filters the user set.
+ */
+export const invoiceListQuerySchema = z.object({
+  cashSessionId: uuidSchema.nullable().optional(),
+  status: z.enum(INVOICE_STATUSES).nullable().optional(),
+  from: z.string().min(1).nullable().optional(),
+  to: z.string().min(1).nullable().optional(),
+});
+export type InvoiceListQuery = z.infer<typeof invoiceListQuerySchema>;
 
 /** `payments.status`.
  */

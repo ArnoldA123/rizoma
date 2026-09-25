@@ -20,6 +20,7 @@ import {
   keycloakEndpoint,
 } from '@/lib/server-config';
 import { decodeFlow, encodeSession, sessionCookieOptions } from '@/lib/session-codec';
+import { REFRESH_COOKIE, encodeRefresh } from '@/lib/refresh';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -65,6 +66,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   const response = NextResponse.redirect(new URL(flow.next, WEB_ORIGIN));
+  const cookieOptions = sessionCookieOptions(WEB_ORIGIN, SESSION_MAX_AGE_SECONDS);
   response.cookies.set(
     SESSION_COOKIE,
     encodeSession({
@@ -72,8 +74,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       expiresAt: Date.now() + tokens.expiresIn * 1000,
       tokenType: tokens.tokenType,
     }),
-    sessionCookieOptions(WEB_ORIGIN, SESSION_MAX_AGE_SECONDS),
+    cookieOptions,
   );
+  // The refresh material lives in its own cookie so each cookie stays well
+  // under the ~4KB practical limit (see `lib/refresh.ts`). Without a refresh
+  // token the session simply ends when the access token expires.
+  if (tokens.refreshToken !== null) {
+    response.cookies.set(
+      REFRESH_COOKIE,
+      encodeRefresh({ refreshToken: tokens.refreshToken, idToken: tokens.idToken }),
+      cookieOptions,
+    );
+  }
   response.cookies.delete(OIDC_FLOW_COOKIE);
   return response;
 }

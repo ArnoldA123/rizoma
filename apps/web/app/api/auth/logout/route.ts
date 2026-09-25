@@ -8,6 +8,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { SESSION_COOKIE } from '@/lib/config';
 import { buildLogoutUrl } from '@/lib/oidc';
+import { REFRESH_COOKIE, decodeRefresh } from '@/lib/refresh';
 import {
   KEYCLOAK_CLIENT_ID,
   OIDC_POST_LOGOUT_REDIRECT_URI,
@@ -21,18 +22,23 @@ export const dynamic = 'force-dynamic';
 
 export function GET(request: NextRequest): NextResponse {
   const tokens = decodeSession(request.cookies.get(SESSION_COOKIE)?.value);
+  // The ID token lives in the refresh cookie since the slimming (legacy
+  // cookies may still carry it in the session cookie, hence the fallback).
+  const refresh = decodeRefresh(request.cookies.get(REFRESH_COOKIE)?.value);
+  const idToken = refresh?.idToken ?? tokens?.idToken ?? null;
 
   const target =
-    tokens?.idToken === null || tokens?.idToken === undefined
+    idToken === null
       ? new URL('/login', WEB_ORIGIN).toString()
       : buildLogoutUrl({
           endSessionEndpoint: keycloakEndpoint('logout'),
           clientId: KEYCLOAK_CLIENT_ID,
           postLogoutRedirectUri: OIDC_POST_LOGOUT_REDIRECT_URI,
-          idTokenHint: tokens.idToken,
+          idTokenHint: idToken,
         });
 
   const response = NextResponse.redirect(target);
   response.cookies.delete(SESSION_COOKIE);
+  response.cookies.delete(REFRESH_COOKIE);
   return response;
 }

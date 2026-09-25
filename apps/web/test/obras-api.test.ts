@@ -34,11 +34,14 @@ import {
   getSiteBoard,
   importAssetsCsv,
   importWorkersCsv,
+  listAssets,
   listAttendance,
+  listInventoryItems,
   listProgressEntries,
   listSiteLogs,
   listSiteStaff,
   listSites,
+  listStockMoves,
   markAttendance,
   postProgressEntry,
   postStockMove,
@@ -167,6 +170,9 @@ test('lecturas de obras: ruta /api/proxy/obras/... en GET y sin Idempotency-Key'
   await listAttendance({ site: SITE, date: '2026-09-25' });
   await listProgressEntries({ site: SITE });
   await listSiteLogs(SITE);
+  await listAssets();
+  await listInventoryItems();
+  await listStockMoves();
 
   assert.deepEqual(
     calls.map((call) => call.url),
@@ -176,6 +182,9 @@ test('lecturas de obras: ruta /api/proxy/obras/... en GET y sin Idempotency-Key'
       `${PROXY_BASE_PATH}/obras/attendance?site=${SITE}&date=2026-09-25`,
       `${PROXY_BASE_PATH}/obras/progress/entries?site=${SITE}`,
       `${PROXY_BASE_PATH}/obras/sites/${SITE}/logs`,
+      `${PROXY_BASE_PATH}/obras/assets`,
+      `${PROXY_BASE_PATH}/obras/stock/items`,
+      `${PROXY_BASE_PATH}/obras/stock/moves`,
     ],
   );
   for (const call of calls) {

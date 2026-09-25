@@ -5,7 +5,7 @@
 // caja role), the SQL and the write audit. The `Idempotency-Key` header is the
 // only extra request fact the issue route needs, so it is read here and passed
 // through unchanged.
-import { Body, Controller, Get, Headers, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query, Req } from '@nestjs/common';
 import type { TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 import {
   actorFromRequest,
@@ -14,6 +14,7 @@ import {
   getInvoiceWithFiscal,
   IDEMPOTENCY_KEY_HEADER,
   issueInvoice,
+  listInvoices,
   listQuotes,
   openCashSession,
   payInvoice,
@@ -78,6 +79,18 @@ export class BillingController {
     @Body() body: unknown,
   ): Promise<InvoiceRecord> {
     return voidInvoice(actorFromRequest(req), id, body);
+  }
+
+  /** `GET /v1/billing/invoices` — invoices inside the caller scope, capped at 200. */
+  @Get('invoices')
+  invoices(
+    @Req() req: TenantScopedRequest,
+    @Query('cashSession') cashSession?: string,
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ): Promise<InvoiceRecord[]> {
+    return listInvoices(actorFromRequest(req), { cashSession, status, from, to });
   }
 
   /** `GET /v1/billing/invoices/:id` — invoice + fiscal status/payload. */
