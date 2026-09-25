@@ -26,11 +26,22 @@
 //
 // Read-path note (load-bearing, §6.3): the consolidated bases specify that the
 // dashboards read the read replica with a 5–15 min Redis cache and never the
-// primary. MVP1 has neither: these are direct bounded queries against the
-// request transaction's connection. Un-HAVING the `LIMIT`/aggregate shape and
-// pointing the connection at the replica is the follow-up; the KPI contract and
-// the HTTP surface do not change.
+// primary. R2 adds the Redis half: `getBoard`/`getComparedBoard` read through
+// `cache/boards.ts` (cache-aside, salud TTL 900s, fail-open to the primary).
+// There is still no replica — the cache sits in front of the same request
+// transaction connection — and v1 does no write invalidation: a board is
+// fresh for its `{day}` window plus its TTL at most, matching the web poll
+// rhythm. Every query stays bounded (`LIMIT`/aggregate); only the connection
+// target (replica) is still a follow-up. The KPI contract and the HTTP
+// surface do not change.
 import { HttpException } from '@nestjs/common';
+import {
+  SALUD_BOARD_TTL_SECONDS,
+  saludBoardKey,
+  saludComparedBoardKey,
+  withBoardCache,
+  type BoardCacheClient,
+} from '../cache/boards.ts';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
 import type { ActorContext, SaludClient } from './salud.service.ts';
@@ -593,12 +604,19 @@ function boardToCsv(board: DashboardBoard): string {
 /**
  * Returns the board of `role` for one sede and day. The caller must be that
  * role; any other board is a 403 (`role.denied`) audited by the guard.
+ *
+ * Cache-aside (R2): with a `cache` (the shared `REDIS_CLIENT`), the bounded
+ * primary SQL runs once per `{tenant, role, org, date}` per TTL (900s) and
+ * repeated polls read Redis. Without it — or with Redis down — the read
+ * falls through to the primary; the cache never turns a board into a 500.
+ * Day-scoped writes do not invalidate in v1 (see `cache/boards.ts`).
  */
 export async function getBoard(
   actor: ActorContext,
   role: string,
   orgNodeId?: string,
   date?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<DashboardBoard> {
   const boardRole = parseRole(role, actor.traceId);
   const facts = await loadFacts(actor);
@@ -608,14 +626,18 @@ export async function getBoard(
 
   await authorizeBoard(actor, facts, boardRole, targetOrg);
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, targetOrg);
-  return readBoard(actor, boardRole, targetOrg, scope, boardDate);
+  const key = saludBoardKey(actor.tenantId, boardRole, targetOrg, boardDate);
+  return withBoardCache(cache, key, SALUD_BOARD_TTL_SECONDS, () =>
+    readBoard(actor, boardRole, targetOrg, scope, boardDate),
+  );
 }
 
 /**
  * Returns `{current, previous, delta}` for one board: the board of `date`
  * next to the board of `date − 7d`, with the same parametrized SQL on both
  * legs. Authorization and scope resolve once, so the comparison cannot widen
- * what `getBoard` allows.
+ * what `getBoard` allows. The envelope is cached under its own `:prev7d` key
+ * with the same TTL and fail-open rule as `getBoard`.
  */
 export async function getComparedBoard(
   actor: ActorContext,
@@ -623,6 +645,7 @@ export async function getComparedBoard(
   orgNodeId?: string,
   date?: string,
   compare?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<ComparedDashboardBoard> {
   parseCompare(compare, actor.traceId);
   const boardRole = parseRole(role, actor.traceId);
@@ -634,14 +657,19 @@ export async function getComparedBoard(
   await authorizeBoard(actor, facts, boardRole, targetOrg);
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, targetOrg);
   const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
-  const current = await readBoard(actor, boardRole, targetOrg, scope, boardDate);
-  const previous = await readBoard(actor, boardRole, targetOrg, scope, previousDate);
-  return { current, previous, delta: diffDashboardBoards(current, previous) };
+  const key = saludComparedBoardKey(actor.tenantId, boardRole, targetOrg, boardDate);
+  return withBoardCache(cache, key, SALUD_BOARD_TTL_SECONDS, async () => {
+    const current = await readBoard(actor, boardRole, targetOrg, scope, boardDate);
+    const previous = await readBoard(actor, boardRole, targetOrg, scope, previousDate);
+    return { current, previous, delta: diffDashboardBoards(current, previous) };
+  });
 }
 
 /**
  * Exports one board aggregate as CSV (`GET .../export?format=csv`). Same
- * aggregate and same bound as the JSON board, one row, wide format.
+ * aggregate and same bound as the JSON board, one row, wide format. The
+ * optional `cache` is forwarded to `getBoard`, so exports share the board
+ * keys instead of minting CSV ones.
  */
 export async function exportBoard(
   actor: ActorContext,
@@ -649,9 +677,10 @@ export async function exportBoard(
   orgNodeId?: string,
   date?: string,
   format?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<BoardExport> {
   parseExportFormat(format, actor.traceId);
-  const board = await getBoard(actor, role, orgNodeId, date);
+  const board = await getBoard(actor, role, orgNodeId, date, cache);
   return {
     filename: safeExportFilename(board.role, board.date),
     contentType: BOARD_EXPORT_CONTENT_TYPE,

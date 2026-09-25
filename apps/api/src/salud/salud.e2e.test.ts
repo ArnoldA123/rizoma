@@ -39,6 +39,13 @@ const DATABASE_URL_PGBOUNCER =
   'postgresql://rizoma:rizoma_demo_password@127.0.0.1:6432/rizoma';
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://:rizoma_demo_password@127.0.0.1:6379';
 
+/**
+ * CI guard against masking: with `REQUIRE_E2E_DB=1` the suite fails instead
+ * of skipping when the database is unreachable, so a green CI job always
+ * means the suite really ran. Local runs keep the historic skip.
+ */
+const REQUIRE_DB = process.env.REQUIRE_E2E_DB === '1';
+
 // ============ synthetic fixtures ============
 
 const TENANT_SALUD = 'a1000000-0000-4000-8000-000000000001';
@@ -292,7 +299,13 @@ describe('salud API e2e (local stack)', () => {
     db = new Client({ connectionString: DATABASE_URL });
     try {
       await db.connect();
-    } catch {
+    } catch (error) {
+      if (REQUIRE_DB) {
+        throw new Error(
+          'REQUIRE_E2E_DB=1 is set but the database is unreachable — refusing to skip',
+          { cause: error },
+        );
+      }
       return;
     }
     stackReady = true;
@@ -358,11 +371,18 @@ describe('salud API e2e (local stack)', () => {
     assert.equal(result.body.tenantId, TENANT_SALUD);
     assert.equal(result.body.orgNodeId, SEDE_A);
 
-    const stored = await db.query(
-      'SELECT person_name FROM patient_files WHERE tenant_id = $1 AND id = $2',
-      [TENANT_SALUD, id],
-    );
-    assert.equal(stored.rowCount, 1);
+    // Poll, like every other read-after-write in this suite: the tenant
+    // middleware commits on the response `finish` event, i.e. after the 201
+    // body is already in our hands, so one immediate SELECT can run before
+    // the COMMIT lands (CI-only flake at this exact line, `0 !== 1`).
+    const stored = await waitFor(async () => {
+      const result = await db.query(
+        'SELECT person_name FROM patient_files WHERE tenant_id = $1 AND id = $2',
+        [TENANT_SALUD, id],
+      );
+      return result.rowCount === 1 ? result : null;
+    });
+    assert.notEqual(stored, null, 'the patient row is committed');
 
     const audit = await auditByTraceEventually(result.traceId);
     assert.equal(audit.length, 1);

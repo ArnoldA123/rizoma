@@ -28,12 +28,26 @@
 //
 // Read-path note (load-bearing, §6.2): the consolidated bases specify that the
 // dashboards read the read replica with a short Redis cache and never the
-// primary. MVP1 has neither: these are direct bounded queries against the
-// request transaction's connection. Pointing the connection at the replica and
-// adding the cache is the follow-up; the KPI contract and the HTTP surface do
-// not change. Every row-returning query carries a `LIMIT` and every aggregate
-// collapses to one row (`LIMIT 1`).
+// primary. R2 adds the Redis half: every board below reads through
+// `cache/boards.ts` (cache-aside, obras TTL 300s, fail-open to the primary).
+// There is still no replica — the cache sits in front of the same request
+// transaction connection — and v1 does no write invalidation: a board is
+// fresh for its `{day}` window plus its TTL at most, matching the web poll
+// rhythm. Every row-returning query carries a `LIMIT` and every aggregate
+// collapses to one row (`LIMIT 1`); only the connection target (replica) is
+// still a follow-up. The KPI contract and the HTTP surface do not change.
 import { HttpException } from '@nestjs/common';
+import {
+  OBRAS_BOARD_TTL_SECONDS,
+  getBoard as getCachedBoard,
+  obrasCompanyBoardKey,
+  obrasCompanyComparedBoardKey,
+  obrasSiteBoardKey,
+  obrasSiteComparedBoardKey,
+  setBoard as setCachedBoard,
+  withBoardCache,
+  type BoardCacheClient,
+} from '../cache/boards.ts';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction } from '../auth/policy.ts';
 import {
@@ -650,30 +664,42 @@ function companyBoardToCsv(board: CompanyBoard): string {
  * `requireSiteAccess` (central rule plus the construction key), so an
  * assignment-scoped worker sees its own site and a manager sees the sites its
  * subtree covers.
+ *
+ * Cache-aside (R2): with a `cache` (the shared `REDIS_CLIENT`), the bounded
+ * primary SQL runs once per `{tenant, site, date}` per TTL (300s). Without
+ * it — or with Redis down — the read falls through to the primary; the cache
+ * never turns a board into a 500. Day-scoped writes do not invalidate in v1
+ * (see `cache/boards.ts`).
  */
 export async function getSiteBoard(
   actor: ObraActorContext,
   siteId: string,
   date?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<SiteBoard> {
   if (!UUID_RE.test(siteId?.trim() ?? '')) throw badRequest('Invalid site id', actor.traceId);
   const boardDate = parseDate(date, actor.traceId);
   const site: SiteRecord = await requireSiteAccess(actor, actor.userId, siteId.trim());
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, site.orgNodeId);
-  return readSiteBoard(actor, site, scope, boardDate);
+  const key = obrasSiteBoardKey(actor.tenantId, site.id, boardDate);
+  return withBoardCache(cache, key, OBRAS_BOARD_TTL_SECONDS, () =>
+    readSiteBoard(actor, site, scope, boardDate),
+  );
 }
 
 /**
  * Returns `{current, previous, delta}` for one site: the board of `date`
  * next to the board of `date − 7d`, with the same parametrized SQL on both
  * legs. Site access resolves once, so the comparison cannot widen what
- * `getSiteBoard` allows.
+ * `getSiteBoard` allows. The envelope is cached under its own `:prev7d` key
+ * with the same TTL and fail-open rule as `getSiteBoard`.
  */
 export async function getComparedSiteBoard(
   actor: ObraActorContext,
   siteId: string,
   date?: string,
   compare?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<ComparedSiteBoard> {
   parseCompare(compare, actor.traceId);
   if (!UUID_RE.test(siteId?.trim() ?? '')) throw badRequest('Invalid site id', actor.traceId);
@@ -681,24 +707,29 @@ export async function getComparedSiteBoard(
   const site: SiteRecord = await requireSiteAccess(actor, actor.userId, siteId.trim());
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, site.orgNodeId);
   const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
-  const current = await readSiteBoard(actor, site, scope, boardDate);
-  const previous = await readSiteBoard(actor, site, scope, previousDate);
-  return { current, previous, delta: diffSiteBoards(current, previous) };
+  const key = obrasSiteComparedBoardKey(actor.tenantId, site.id, boardDate);
+  return withBoardCache(cache, key, OBRAS_BOARD_TTL_SECONDS, async () => {
+    const current = await readSiteBoard(actor, site, scope, boardDate);
+    const previous = await readSiteBoard(actor, site, scope, previousDate);
+    return { current, previous, delta: diffSiteBoards(current, previous) };
+  });
 }
 
 /**
  * Exports one site board as CSV (`GET .../board/export?format=csv`). Same
  * aggregates and same `LIMIT` as the JSON board, progress-line grain with the
- * day attendance as context columns.
+ * day attendance as context columns. The optional `cache` is forwarded to
+ * `getSiteBoard`, so exports share the board keys instead of minting CSV ones.
  */
 export async function exportSiteBoard(
   actor: ObraActorContext,
   siteId: string,
   date?: string,
   format?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<BoardExport> {
   parseExportFormat(format, actor.traceId);
-  const board = await getSiteBoard(actor, siteId, date);
+  const board = await getSiteBoard(actor, siteId, date, cache);
   return {
     filename: safeExportFilename(`tablero-obra-${board.siteCode}-${board.date}`, 'tablero-obra.csv'),
     contentType: BOARD_EXPORT_CONTENT_TYPE,
@@ -706,13 +737,31 @@ export async function exportSiteBoard(
   };
 }
 
+/** Plain scope-state snapshot behind the company board: JSON-safe on purpose. */
+interface CompanySnapshot {
+  readonly total: number;
+  readonly active: number;
+  readonly plannedSites: number;
+  readonly closed: number;
+  readonly qtyPlanned: number;
+  readonly qtyDone: number;
+}
+
 /**
  * Reads the company board over the caller's scope for one labeled day. The
  * KPIs are scope-state (they aggregate the membership subtree), so the day is
  * an echoed label for BI series, not a filter — the same rule the company
  * `date` already followed before it became a parameter.
+ *
+ * Only the three scope-state aggregates are cached (key
+ * `rizoma:v1:{tenant}:obras:company:{org}:{date}`, TTL 300s); the guard facts
+ * and authorization always run against the primary.
  */
-async function readCompanyBoard(actor: ObraActorContext, boardDate: string): Promise<CompanyBoard> {
+async function readCompanyBoard(
+  actor: ObraActorContext,
+  boardDate: string,
+  cache?: BoardCacheClient | null,
+): Promise<CompanyBoard> {
   const facts = await loadFacts(actor);
   const membership = await authorize(actor, facts, {
     entity: 'dashboard',
@@ -722,28 +771,41 @@ async function readCompanyBoard(actor: ObraActorContext, boardDate: string): Pro
   });
   const scope = [...facts.scopeSubtree];
 
-  const sites = await actor.client.query(COMPANY_SITES_SQL, [actor.tenantId, scope]);
-  const planned = await actor.client.query(COMPANY_PLANNED_SQL, [actor.tenantId, scope]);
-  const done = await actor.client.query(COMPANY_PROGRESS_SQL, [actor.tenantId, scope]);
-
-  const sitesRow = readRows(sites)[0] ?? {};
-  const qtyPlanned = toNumber(readRows(planned)[0]?.qty_planned);
-  const qtyDone = toNumber(readRows(done)[0]?.qty_done);
+  const key = obrasCompanyBoardKey(actor.tenantId, membership.orgNodeId, boardDate);
+  const snapshot = await withBoardCache<CompanySnapshot>(
+    cache,
+    key,
+    OBRAS_BOARD_TTL_SECONDS,
+    async () => {
+      const sites = await actor.client.query(COMPANY_SITES_SQL, [actor.tenantId, scope]);
+      const planned = await actor.client.query(COMPANY_PLANNED_SQL, [actor.tenantId, scope]);
+      const done = await actor.client.query(COMPANY_PROGRESS_SQL, [actor.tenantId, scope]);
+      const sitesRow = readRows(sites)[0] ?? {};
+      return {
+        total: toNumber(sitesRow.total),
+        active: toNumber(sitesRow.active),
+        plannedSites: toNumber(sitesRow.planned),
+        closed: toNumber(sitesRow.closed),
+        qtyPlanned: toNumber(readRows(planned)[0]?.qty_planned),
+        qtyDone: toNumber(readRows(done)[0]?.qty_done),
+      };
+    },
+  );
 
   return {
     orgNodeId: membership.orgNodeId,
     date: boardDate,
     sites: {
-      total: toNumber(sitesRow.total),
-      active: toNumber(sitesRow.active),
-      planned: toNumber(sitesRow.planned),
-      closed: toNumber(sitesRow.closed),
+      total: snapshot.total,
+      active: snapshot.active,
+      planned: snapshot.plannedSites,
+      closed: snapshot.closed,
     },
     progress: {
-      qtyPlanned,
-      qtyDone,
-      qtyRemaining: Math.max(0, qtyPlanned - qtyDone),
-      percent: percentOf(qtyDone, qtyPlanned),
+      qtyPlanned: snapshot.qtyPlanned,
+      qtyDone: snapshot.qtyDone,
+      qtyRemaining: Math.max(0, snapshot.qtyPlanned - snapshot.qtyDone),
+      percent: percentOf(snapshot.qtyDone, snapshot.qtyPlanned),
     },
     notApplicable: {
       collections: 'not applicable: MVP1 Obras has no invoicing/collections (billing vertical)',
@@ -755,42 +817,67 @@ async function readCompanyBoard(actor: ObraActorContext, boardDate: string): Pro
 /**
  * Returns the company board over the caller's scope. The KPIs aggregate every
  * site inside the membership subtree; `notApplicable` records the two §6.2
- * blocks that do not exist in MVP1 (cobranza, uso por módulo).
+ * blocks that do not exist in MVP1 (cobranza, uso por módulo). The optional
+ * `cache` warms the company key (TTL 300s) with the same fail-open rule as
+ * the site board.
  */
-export async function getCompanyBoard(actor: ObraActorContext, date?: string): Promise<CompanyBoard> {
-  return readCompanyBoard(actor, parseDate(date, actor.traceId));
+export async function getCompanyBoard(
+  actor: ObraActorContext,
+  date?: string,
+  cache?: BoardCacheClient | null,
+): Promise<CompanyBoard> {
+  return readCompanyBoard(actor, parseDate(date, actor.traceId), cache);
 }
 
 /**
  * Returns `{current, previous, delta}` for the company board: the scope-state
  * snapshot labeled with `date` next to the one labeled `date − 7d`, same SQL
  * on both legs. See {@link ComparedCompanyBoard} for why the drift reads 0
- * within one request.
+ * within one request. The company org resolves through authorization, so the
+ * `:prev7d` envelope is keyed after it; pass the `cache` through to also warm
+ * the single-board keys.
  */
 export async function getComparedCompanyBoard(
   actor: ObraActorContext,
   date?: string,
   compare?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<ComparedCompanyBoard> {
   parseCompare(compare, actor.traceId);
   const boardDate = parseDate(date, actor.traceId);
   const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
-  const current = await readCompanyBoard(actor, boardDate);
-  const previous = await readCompanyBoard(actor, previousDate);
-  return { current, previous, delta: diffCompanyBoards(current, previous) };
+  // The company org resolves through authorization inside `readCompanyBoard`,
+  // so the `:prev7d` envelope key derives from the current leg (whose single
+  // key is already warm by then). An envelope hit skips the previous leg;
+  // a miss reads it and stores the envelope with the same TTL and fail-open
+  // rule. No extra authorization runs: both legs keep their own audit row.
+  const current = await readCompanyBoard(actor, boardDate, cache);
+  const key = obrasCompanyComparedBoardKey(actor.tenantId, current.orgNodeId, boardDate);
+  const cached = await getCachedBoard<ComparedCompanyBoard>(cache, key);
+  if (cached !== null) return cached;
+  const previous = await readCompanyBoard(actor, previousDate, cache);
+  const compared: ComparedCompanyBoard = {
+    current,
+    previous,
+    delta: diffCompanyBoards(current, previous),
+  };
+  await setCachedBoard(cache, key, compared, OBRAS_BOARD_TTL_SECONDS);
+  return compared;
 }
 
 /**
  * Exports the company board as CSV (`GET .../board/export?format=csv`). Same
- * aggregate as the JSON board, one row, wide format.
+ * aggregate as the JSON board, one row, wide format. The optional `cache` is
+ * forwarded to `getCompanyBoard`, so exports share the board key.
  */
 export async function exportCompanyBoard(
   actor: ObraActorContext,
   date?: string,
   format?: string,
+  cache?: BoardCacheClient | null,
 ): Promise<BoardExport> {
   parseExportFormat(format, actor.traceId);
-  const board = await getCompanyBoard(actor, date);
+  const board = await getCompanyBoard(actor, date, cache);
   return {
     filename: safeExportFilename(`tablero-empresa-${board.date}`, 'tablero-empresa.csv'),
     contentType: BOARD_EXPORT_CONTENT_TYPE,

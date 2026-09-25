@@ -1,6 +1,6 @@
 {
   "name": "@rizoma/workers",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Rizoma BullMQ workers — outbox dispatch and provider/fiscal adapters (only workers call adapters).",
   "engines": {

@@ -89,3 +89,77 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h localhost -U postgres -d rizoma_ci -v ON_ERROR_STOP=1 -f db/tests/tenant_isolation.sql
+
+  e2e:
+    # End-to-end API suites against a live stack (R3). Each `test:e2e*` script
+    # builds `dist` first and then boots `dist/main.js` on a free loopback
+    # port, so no published API port is needed from the runner.
+    #
+    # - postgres:16 mirrors the local compose database (same name, user and
+    #   password as the harness defaults), so the suite connects without
+    #   overrides. Migrations 001-009 are applied with psql before the run.
+    # - No PgBouncer container: `DATABASE_URL_PGBOUNCER` points at the same
+    #   direct Postgres. The request contract (`SET LOCAL` inside one
+    #   transaction) holds on a direct connection; PgBouncer in transaction
+    #   mode stays a local/production scaling concern (see infra/docker).
+    # - redis:7 runs without a password, hence the passwordless `REDIS_URL`
+    #   override. The API boots without Redis (`lazyConnect`) and the board
+    #   cache is fail-open, so this only affects the `/health` detail flags.
+    # - `REQUIRE_E2E_DB=1` turns the harness skip-without-DB into a hard
+    #   failure: a green job always means the suites really ran. Any suite
+    #   failure exits `node --test` non-zero and the job goes red.
+    name: E2E (salud + obras)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rizoma
+          POSTGRES_PASSWORD: rizoma_demo_password
+          POSTGRES_DB: rizoma
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rizoma -d rizoma"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping | grep PONG"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://rizoma:rizoma_demo_password@localhost:5432/rizoma
+      DATABASE_URL_PGBOUNCER: postgresql://rizoma:rizoma_demo_password@localhost:5432/rizoma
+      REDIS_URL: redis://localhost:6379
+      REQUIRE_E2E_DB: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install workspaces
+        run: npm ci
+
+      - name: Apply migrations 001-009
+        env:
+          PGPASSWORD: rizoma_demo_password
+        run: |
+          for f in db/migrations/001_*.sql db/migrations/002_*.sql db/migrations/003_*.sql db/migrations/004_*.sql db/migrations/005_*.sql db/migrations/006_*.sql db/migrations/007_*.sql db/migrations/008_*.sql db/migrations/009_*.sql; do
+            psql -h localhost -U rizoma -d rizoma -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: E2E salud
+        run: npm run test:e2e --workspace @rizoma/api
+
+      - name: E2E obras
+        run: npm run test:e2e-obras --workspace @rizoma/api

@@ -86,3 +86,8 @@ export * from './onboarding.ts';
 // only `zod`, so re-exporting it here exposes the schemas through the public
 // entry point without touching `index.ts` and without an import cycle.
 export * from './files.ts';
+
+// Keyset pagination contracts (R1): same wiring — `pagination.ts` imports
+// only `zod`, so this re-export exposes the cursor/limit/envelope helpers
+// through the public entry point without touching `index.ts`.
+export * from './pagination.ts';

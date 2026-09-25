@@ -61,6 +61,71 @@ export const DEFAULT_FISCAL_ADAPTER = 'manual_v1';
 /** Rows a list endpoint returns at most; keeps a stray wide scan bounded. */
 export const BILLING_LIST_LIMIT = 200;
 
+// ============ keyset pagination (R1) ============
+
+/**
+ * Default/max page size for the keyset invoice listing; mirrors
+ * `PAGINATION_DEFAULT_LIMIT` / `PAGINATION_MAX_LIMIT` in
+ * `packages/contracts/src/pagination.ts`. The API keeps its own constants so
+ * the runtime has no cross-package import; the values must stay 200/200 on
+ * both sides.
+ */
+export const BILLING_PAGE_DEFAULT_LIMIT = BILLING_LIST_LIMIT;
+export const BILLING_PAGE_MAX_LIMIT = BILLING_LIST_LIMIT;
+
+/** One keyset page: the rows plus the opaque cursor for the next page (null = end). */
+export interface BillingPage<T> {
+  readonly rows: T[];
+  readonly nextCursor: string | null;
+}
+
+/** Reads a non-empty pagination param from the list query, or null when absent/blank. */
+function readPageParam(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isInteger(value)) return String(value);
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/** Normalizes `?limit=`: absent/empty uses 200, above 200 clamps, anything else outside 1..200 is a 400. */
+function parsePageLimit(raw: string | null, traceId: string): number {
+  if (raw === null) return BILLING_PAGE_DEFAULT_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw billingError(BILLING_ERROR.invalidParam, 'limit must be an integer between 1 and 200', 400, traceId);
+  }
+  return Math.min(parsed, BILLING_PAGE_MAX_LIMIT);
+}
+
+/** Encodes one ordering key as the opaque `nextCursor` (base64url JSON, same shape as `encodeCursor` in the contracts). */
+function encodePageCursor(payload: Record<string, string>): string {
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+/** Decodes `?cursor=` back to its ordering key; any malformed input is a 400 `billing.invalid_param`. */
+function decodePageCursor(cursor: string, traceId: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown;
+  } catch {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, traceId);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, traceId);
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'string' || value === '') {
+      throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, traceId);
+    }
+    out[key] = value;
+  }
+  if (Object.keys(out).length === 0) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, traceId);
+  }
+  return out;
+}
+
 /** Timestamped value (`timestamptz`) normalized to a plain string. */
 type IsoValue = string | null;
 
@@ -961,9 +1026,43 @@ export function parseInvoiceListFilters(query: unknown, traceId: string): Invoic
  * `BILLING_LIST_LIMIT`. Same read contract as `listQuotes`: the guard
  * (`invoice.issue`) owns the denial audit and a successful read writes no
  * audit row — reads are not writes (§4.4).
+ *
+ * Keyset pagination (R1): without `?cursor=`/`?limit=` the legacy bare array
+ * (cap 200) is returned unchanged. With either, the `{rows, nextCursor}`
+ * page is returned instead, ordered by the stable `created_at DESC, id DESC`
+ * (the legacy `ORDER BY created_at DESC` plus the `id` tiebreaker;
+ * `created_at` is NOT NULL per `004_facturacion.sql`). The cursor is the
+ * opaque base64url of the last row's `{createdAt, id}`; the query fetches
+ * `limit + 1` rows and a non-null `nextCursor` means there is another page.
+ * Every filter (`cashSession`, `status`, `from`/`to`, `?saved_view_id=`) ANDs
+ * with the keyset predicate, so a filtered walk stays inside the filter.
  */
-export async function listInvoices(actor: ActorContext, query: unknown): Promise<InvoiceRecord[]> {
+export async function listInvoices(
+  actor: ActorContext,
+  query: unknown,
+): Promise<InvoiceRecord[] | BillingPage<InvoiceRecord>> {
   const filters = parseInvoiceListFilters(query, actor.traceId);
+  const record = asRecord(query);
+  const rawCursor = readPageParam(record.cursor);
+  const rawLimit = readPageParam(record.limit);
+  const paged = rawCursor !== null || rawLimit !== null;
+  const limit = parsePageLimit(rawLimit, actor.traceId);
+  let cursorCreatedAt: string | null = null;
+  let cursorId: string | null = null;
+  if (rawCursor !== null) {
+    const payload = decodePageCursor(rawCursor, actor.traceId);
+    cursorCreatedAt = payload.createdAt ?? null;
+    cursorId = payload.id ?? null;
+    if (cursorCreatedAt === null || cursorId === null) {
+      throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, actor.traceId);
+    }
+    if (Number.isNaN(Date.parse(cursorCreatedAt))) {
+      throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, actor.traceId);
+    }
+    if (!UUID_RE.test(cursorId)) {
+      throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, actor.traceId);
+    }
+  }
   const facts = await loadFacts(actor);
   await authorize(actor, facts, {
     entity: 'invoice',
@@ -988,7 +1087,7 @@ export async function listInvoices(actor: ActorContext, query: unknown): Promise
     values.push(filters.to);
     conditions.push(`COALESCE(issued_at, created_at) <= $${values.length}::timestamptz`);
   }
-  const savedViewId = readOptionalFilter(asRecord(query).saved_view_id);
+  const savedViewId = readOptionalFilter(record.saved_view_id);
   if (savedViewId !== null) {
     const extra = await resolveSavedViewForList(actor, savedViewId, 'invoices');
     const { clauses, values: viewValues } = buildSavedViewConditions(
@@ -1000,13 +1099,39 @@ export async function listInvoices(actor: ActorContext, query: unknown): Promise
     conditions.push(...clauses);
     values.push(...viewValues);
   }
+  if (cursorCreatedAt !== null && cursorId !== null) {
+    values.push(cursorCreatedAt, cursorId);
+    const createdAtParam = values.length - 1;
+    const idParam = values.length;
+    conditions.push(
+      `(created_at < $${createdAtParam}::timestamptz OR ` +
+        `(created_at = $${createdAtParam}::timestamptz AND id < $${idParam}::uuid))`,
+    );
+  }
+  if (!paged) {
+    const result = await actor.client.query(
+      `SELECT ${INVOICE_COLUMNS} FROM invoices ` +
+        `WHERE ${conditions.join(' AND ')} ` +
+        `ORDER BY created_at DESC LIMIT ${BILLING_LIST_LIMIT}`,
+      values,
+    );
+    return readRows(result).map(mapInvoice);
+  }
   const result = await actor.client.query(
     `SELECT ${INVOICE_COLUMNS} FROM invoices ` +
       `WHERE ${conditions.join(' AND ')} ` +
-      `ORDER BY created_at DESC LIMIT ${BILLING_LIST_LIMIT}`,
+      `ORDER BY created_at DESC, id DESC LIMIT ${limit + 1}`,
     values,
   );
-  return readRows(result).map(mapInvoice);
+  const rows = readRows(result).map(mapInvoice);
+  if (rows.length <= limit) return { rows, nextCursor: null };
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  // `created_at` is NOT NULL, so the null branch is defensive only: without
+  // an ordering key there is no cursor to offer, and ending here beats
+  // emitting a cursor that the next call would reject.
+  if (last === undefined || last.createdAt === null) return { rows: page, nextCursor: null };
+  return { rows: page, nextCursor: encodePageCursor({ createdAt: last.createdAt, id: last.id }) };
 }
 
 /** Quotes inside the membership subtree. */

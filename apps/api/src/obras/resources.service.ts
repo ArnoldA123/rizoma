@@ -54,6 +54,67 @@ export { OBRA_MODULE };
 /** Rows the list endpoints return at most; keeps a stray wide scan bounded. */
 export const OBRA_RESOURCE_LIST_LIMIT = OBRA_LIST_LIMIT;
 
+// ============ keyset pagination (R1) ============
+
+/**
+ * Default/max page size for the keyset asset/move listings; mirrors
+ * `PAGINATION_DEFAULT_LIMIT` / `PAGINATION_MAX_LIMIT` in
+ * `packages/contracts/src/pagination.ts`. The API keeps its own constants so
+ * the runtime has no cross-package import; the values must stay 200/200 on
+ * both sides.
+ */
+export const OBRA_RESOURCE_PAGE_DEFAULT_LIMIT = OBRA_RESOURCE_LIST_LIMIT;
+export const OBRA_RESOURCE_PAGE_MAX_LIMIT = OBRA_RESOURCE_LIST_LIMIT;
+
+/** `?cursor=` + `?limit=` input for the keyset asset/move listings. */
+export interface ResourcePageInput {
+  readonly cursor?: string | null;
+  readonly limit?: number | string | null;
+}
+
+/** One keyset page: the rows plus the opaque cursor for the next page (null = end). */
+export interface ResourcePage<T> {
+  readonly rows: T[];
+  readonly nextCursor: string | null;
+}
+
+/** Normalizes `?limit=`: absent/empty uses 200, above 200 clamps, anything else outside 1..200 is a 400. */
+function parseResourcePageLimit(raw: number | string | null | undefined, traceId: string): number {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+    return OBRA_RESOURCE_PAGE_DEFAULT_LIMIT;
+  }
+  const parsed = typeof raw === 'number' ? raw : Number(raw.trim());
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw badRequest('limit must be an integer between 1 and 200', traceId);
+  }
+  return Math.min(parsed, OBRA_RESOURCE_PAGE_MAX_LIMIT);
+}
+
+/** Encodes one ordering key as the opaque `nextCursor` (base64url JSON, same shape as `encodeCursor` in the contracts). */
+function encodeResourcePageCursor(payload: Record<string, string>): string {
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+}
+
+/** Decodes `?cursor=` back to its ordering key; any malformed input is a 400. */
+function decodeResourcePageCursor(cursor: string, traceId: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown;
+  } catch {
+    throw badRequest('Invalid pagination cursor', traceId);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw badRequest('Invalid pagination cursor', traceId);
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'string' || value === '') throw badRequest('Invalid pagination cursor', traceId);
+    out[key] = value;
+  }
+  if (Object.keys(out).length === 0) throw badRequest('Invalid pagination cursor', traceId);
+  return out;
+}
+
 /** Timestamped value (`timestamptz`/`date`) normalized to a plain string. */
 type IsoValue = string | null;
 
@@ -1081,6 +1142,63 @@ export async function listAssets(actor: ObraActorContext): Promise<AssetRecord[]
   return readRows(result).map(mapAsset);
 }
 
+/**
+ * Keyset page of the equipment units inside the membership subtree.
+ *
+ * Stable order: `code ASC, id ASC` — the legacy `ORDER BY code` plus the
+ * `id` tiebreaker (`code` is UNIQUE per tenant per `005_obras.sql`, so the
+ * tiebreaker only fires on data drift). The cursor is the opaque base64url
+ * of the last row's `{code, id}`; the query fetches `limit + 1` rows and a
+ * non-null `nextCursor` means there is another page.
+ */
+export async function listAssetsPage(
+  actor: ObraActorContext,
+  options: ResourcePageInput = {},
+): Promise<ResourcePage<AssetRecord>> {
+  const limit = parseResourcePageLimit(options.limit, actor.traceId);
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    action: 'site.read',
+    entity: 'asset',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'asset.list',
+  });
+  let cursorCode: string | null = null;
+  let cursorId: string | null = null;
+  const rawCursor = typeof options.cursor === 'string' ? options.cursor.trim() : '';
+  if (rawCursor !== '') {
+    const payload = decodeResourcePageCursor(rawCursor, actor.traceId);
+    cursorCode = payload.code ?? null;
+    cursorId = payload.id ?? null;
+    if (cursorCode === null || cursorId === null) {
+      throw badRequest('Invalid pagination cursor', actor.traceId);
+    }
+    if (!UUID_RE.test(cursorId)) throw badRequest('Invalid pagination cursor', actor.traceId);
+  }
+  const conditions = ['tenant_id = $1', 'org_node_id = ANY($2::uuid[])'];
+  const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  if (cursorCode !== null && cursorId !== null) {
+    values.push(cursorCode, cursorId);
+    const codeParam = values.length - 1;
+    const idParam = values.length;
+    conditions.push(
+      `(code > $${codeParam} OR (code = $${codeParam} AND id > $${idParam}::uuid))`,
+    );
+  }
+  const result = await actor.client.query(
+    `SELECT ${ASSET_COLUMNS} FROM assets ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY code ASC, id ASC LIMIT ${limit + 1}`,
+    values,
+  );
+  const rows = readRows(result).map(mapAsset);
+  if (rows.length <= limit) return { rows, nextCursor: null };
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  if (last === undefined) return { rows: page, nextCursor: null };
+  return { rows: page, nextCursor: encodeResourcePageCursor({ code: last.code, id: last.id }) };
+}
+
 // ============ warehouse stock ============
 
 interface ItemCreateInput {
@@ -1341,6 +1459,69 @@ export async function listMoves(actor: ObraActorContext): Promise<StockMoveRecor
   });
   const result = await actor.client.query(LIST_MOVES_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
   return readRows(result).map(mapMove);
+}
+
+/**
+ * Keyset page of the stock moves booked against warehouses inside the
+ * membership subtree.
+ *
+ * Stable order: `at DESC, id DESC` — the legacy `ORDER BY at DESC` plus the
+ * `id` tiebreaker, so moves posted in the same instant paginate
+ * deterministically (`at` is NOT NULL per `005_obras.sql`). The cursor is
+ * the opaque base64url of the last row's `{at, id}`; the query fetches
+ * `limit + 1` rows and a non-null `nextCursor` means there is another page.
+ */
+export async function listMovesPage(
+  actor: ObraActorContext,
+  options: ResourcePageInput = {},
+): Promise<ResourcePage<StockMoveRecord>> {
+  const limit = parseResourcePageLimit(options.limit, actor.traceId);
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    action: 'site.read',
+    entity: 'stock_move',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'stock.move.list',
+  });
+  let cursorAt: string | null = null;
+  let cursorId: string | null = null;
+  const rawCursor = typeof options.cursor === 'string' ? options.cursor.trim() : '';
+  if (rawCursor !== '') {
+    const payload = decodeResourcePageCursor(rawCursor, actor.traceId);
+    cursorAt = payload.at ?? null;
+    cursorId = payload.id ?? null;
+    if (cursorAt === null || cursorId === null) {
+      throw badRequest('Invalid pagination cursor', actor.traceId);
+    }
+    if (Number.isNaN(Date.parse(cursorAt))) {
+      throw badRequest('Invalid pagination cursor', actor.traceId);
+    }
+    if (!UUID_RE.test(cursorId)) throw badRequest('Invalid pagination cursor', actor.traceId);
+  }
+  const conditions = ['tenant_id = $1', 'warehouse_node_id = ANY($2::uuid[])'];
+  const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  if (cursorAt !== null && cursorId !== null) {
+    values.push(cursorAt, cursorId);
+    const atParam = values.length - 1;
+    const idParam = values.length;
+    conditions.push(
+      `(at < $${atParam}::timestamptz OR ` +
+        `(at = $${atParam}::timestamptz AND id < $${idParam}::uuid))`,
+    );
+  }
+  const result = await actor.client.query(
+    `SELECT ${MOVE_COLUMNS} FROM stock_moves ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY at DESC, id DESC LIMIT ${limit + 1}`,
+    values,
+  );
+  const rows = readRows(result).map(mapMove);
+  if (rows.length <= limit) return { rows, nextCursor: null };
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  // `at` is NOT NULL, so the null branch is defensive only (see `listPatientsPage` in salud).
+  if (last === undefined || last.at === null) return { rows: page, nextCursor: null };
+  return { rows: page, nextCursor: encodeResourcePageCursor({ at: last.at, id: last.id }) };
 }
 
 // ============ budget, progress and milestones ============
