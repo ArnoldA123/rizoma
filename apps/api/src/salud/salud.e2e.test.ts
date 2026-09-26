@@ -257,6 +257,76 @@ async function consentRowEventually(
   });
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+/**
+ * GET until it returns 200. The finish-commit race means a row created by a
+ * 201 in this same run can 404 on the next request; polling the GET keeps
+ * that transient 404 from failing the suite. Only the id from the prior 201
+ * is polled, so a genuinely missing row still fails when the caller asserts
+ * the final 200. Denials (403/400/409) are never retried by callers.
+ */
+async function getByIdEventually(
+  path: string,
+  actor: Actor,
+  attempts = 80,
+): Promise<HttpResult> {
+  let last = await call('GET', path, actor);
+  for (let attempt = 1; attempt < attempts && last.status !== 200; attempt += 1) {
+    await delay(25);
+    last = await call('GET', path, actor);
+  }
+  return last;
+}
+
+/**
+ * A write (POST/PATCH) that retries only the transient 404 signature of the
+ * finish-commit race. Any other status (200/201/400/403/409) returns
+ * immediately, so real denials and validation errors are never masked.
+ */
+async function writeEventually(
+  method: string,
+  path: string,
+  actor: Actor,
+  body?: unknown,
+  extraHeaders: Record<string, string> = {},
+): Promise<HttpResult> {
+  let result = await call(method, path, actor, body, extraHeaders);
+  for (let attempt = 1; attempt < 80 && result.status === 404; attempt += 1) {
+    await delay(25);
+    result = await call(method, path, actor, body, extraHeaders);
+  }
+  return result;
+}
+
+/** One `episodes` row visible over HTTP once its 201 transaction committed. */
+async function episodeVisible(episodeId: string, actor: Actor = MEDICO): Promise<HttpResult> {
+  return getByIdEventually(`/v1/salud/episodes/${episodeId}`, actor);
+}
+
+/** One `consents` row visible once its 201 transaction committed (no GET by id). */
+async function consentVisible(consentId: string): Promise<Record<string, unknown> | null> {
+  return waitFor(async () => {
+    const result = await db.query(`SELECT id FROM consents WHERE tenant_id = $1 AND id = $2`, [
+      TENANT_SALUD,
+      consentId,
+    ]);
+    return result.rowCount === 1 ? (result.rows[0] as Record<string, unknown>) : null;
+  });
+}
+
+/** One `patient_files` row visible over HTTP once its 201 transaction committed. */
+async function patientVisible(patientId: string): Promise<HttpResult> {
+  return getByIdEventually(`/v1/salud/patients/${patientId}`, MEDICO);
+}
+
+/** One `invoices` row visible over HTTP once its 201 transaction committed. */
+async function invoiceVisible(invoiceId: string): Promise<HttpResult> {
+  return getByIdEventually(`/v1/billing/invoices/${invoiceId}`, CAJA);
+}
+
 function uniqueDni(): string {
   return String(Math.floor(Math.random() * 100_000_000)).padStart(8, '0');
 }
@@ -279,7 +349,9 @@ async function createConsent(
   episodeId: string,
   overrides: Record<string, unknown> = {},
 ): Promise<HttpResult> {
-  return call('POST', '/v1/salud/consents', actor, {
+  // writeEventually: the episode 201 of this same run can still be
+  // committing, which reads as a transient 404; 400/403 pass through.
+  return writeEventually('POST', '/v1/salud/consents', actor, {
     patientId: FIXTURE_PATIENT,
     episodeId,
     consultingCenter: SEDE_A,
@@ -457,11 +529,24 @@ describe('salud API e2e (local stack)', () => {
     const episodeId = created.body.id;
     assert.equal(typeof episodeId, 'string');
 
-    const closed = await call('PATCH', `/v1/salud/episodes/${episodeId}`, MEDICO);
+    // The 201 transaction commits on `finish`, after the body is read, so
+    // the immediate close can see a transient 404 without this poll.
+    const visible = await episodeVisible(String(episodeId));
+    assert.equal(visible.status, 200, JSON.stringify(visible.body));
+
+    const closed = await writeEventually('PATCH', `/v1/salud/episodes/${episodeId}`, MEDICO);
     assert.equal(closed.status, 200);
     assert.equal(closed.body.status, 'closed');
     const audit = await auditByTraceEventually(closed.traceId);
     assert.equal(audit[0]?.action, 'episode.closed');
+
+    // Wait until the close is readable before asserting the state denial,
+    // otherwise a stale read could reopen (200) or miss the row (404).
+    const closedVisible = await waitFor(async () => {
+      const seen = await call('GET', `/v1/salud/episodes/${String(episodeId)}`, MEDICO);
+      return seen.status === 200 && seen.body.status === 'closed' ? seen : null;
+    });
+    assert.notEqual(closedVisible, null, 'the closed episode is committed');
 
     const reopened = await call('PATCH', `/v1/salud/episodes/${episodeId}`, MEDICO);
     assert.equal(reopened.status, 403);
@@ -539,6 +624,7 @@ describe('salud API e2e (local stack)', () => {
     });
     assert.equal(episode.status, 201, JSON.stringify(episode.body));
     const episodeId = String(episode.body.id);
+    assert.equal((await episodeVisible(episodeId)).status, 200, 'the episode is committed');
 
     const created = await createConsent(MEDICO, episodeId);
     assert.equal(created.status, 201, JSON.stringify(created.body));
@@ -547,8 +633,9 @@ describe('salud API e2e (local stack)', () => {
     assert.equal(created.body.canStartSession, false, 'a pending consent cannot start');
     const consentId = String(created.body.id);
     assert.equal((await auditByTraceEventually(created.traceId))[0]?.action, 'consent.created');
+    assert.notEqual(await consentVisible(consentId), null, 'the consent is committed');
 
-    const signed = await call('POST', `/v1/salud/consents/${consentId}/sign`, MEDICO, {
+    const signed = await writeEventually('POST', `/v1/salud/consents/${consentId}/sign`, MEDICO, {
       evidenceSha256: CONSENT_SHA256,
     });
     assert.equal(signed.status, 200, JSON.stringify(signed.body));
@@ -570,7 +657,7 @@ describe('salud API e2e (local stack)', () => {
     assert.ok(stored?.signed_at instanceof Date, 'signed_at is stamped');
     assert.equal(typeof stored?.evidence_attachment_id, 'string');
 
-    const revoked = await call('POST', `/v1/salud/consents/${consentId}/revoke`, MEDICO);
+    const revoked = await writeEventually('POST', `/v1/salud/consents/${consentId}/revoke`, MEDICO);
     assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
     assert.equal(revoked.body.status, 'revoked');
     assert.equal(revoked.body.canStartSession, false, 'revocation blocks new sessions');
@@ -599,13 +686,16 @@ describe('salud API e2e (local stack)', () => {
       patientId: FIXTURE_PATIENT,
       specialty: 'teleinterconsulta',
     });
+    assert.equal(episode.status, 201, JSON.stringify(episode.body));
+    assert.equal((await episodeVisible(String(episode.body.id))).status, 200);
     const created = await createConsent(MEDICO, String(episode.body.id), {
       actConsent: 'NO',
       recording: { todo: 'NO' },
     });
     assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.notEqual(await consentVisible(String(created.body.id)), null);
 
-    const signed = await call('POST', `/v1/salud/consents/${String(created.body.id)}/sign`, MEDICO, {
+    const signed = await writeEventually('POST', `/v1/salud/consents/${String(created.body.id)}/sign`, MEDICO, {
       evidenceSha256: CONSENT_SHA256,
     });
     assert.equal(signed.status, 200, JSON.stringify(signed.body));
@@ -624,6 +714,8 @@ describe('salud API e2e (local stack)', () => {
       patientId: FIXTURE_PATIENT,
       specialty: 'teleinterconsulta',
     });
+    assert.equal(episode.status, 201, JSON.stringify(episode.body));
+    assert.equal((await episodeVisible(String(episode.body.id))).status, 200);
     const created = await createConsent(MEDICO, String(episode.body.id));
     const signed = await call('POST', `/v1/salud/consents/${String(created.body.id)}/sign`, MEDICO, {});
     assert.equal(signed.status, 400);
@@ -636,6 +728,8 @@ describe('salud API e2e (local stack)', () => {
       patientId: FIXTURE_PATIENT,
       specialty: 'teleinterconsulta',
     });
+    assert.equal(episode.status, 201, JSON.stringify(episode.body));
+    assert.equal((await episodeVisible(String(episode.body.id))).status, 200);
     const created = await createConsent(MEDICO, String(episode.body.id), { actConsent: undefined });
     assert.equal(created.status, 400);
     assert.equal(created.body.code, 'consent.act_required');
@@ -647,6 +741,8 @@ describe('salud API e2e (local stack)', () => {
       patientId: FIXTURE_PATIENT,
       specialty: 'teleinterconsulta',
     });
+    assert.equal(episode.status, 201, JSON.stringify(episode.body));
+    assert.equal((await episodeVisible(String(episode.body.id))).status, 200);
     const denied = await createConsent(ENFERMERIA, String(episode.body.id));
     assert.equal(denied.status, 403);
     assert.equal(denied.body.reason, 'role.denied');
@@ -685,6 +781,7 @@ describe('salud API e2e (local stack)', () => {
     });
     assert.equal(patient.status, 201, JSON.stringify(patient.body));
     const patientId = String(patient.body.id);
+    assert.equal((await patientVisible(patientId)).status, 200, 'the patient is committed');
 
     // 2. Consentimiento — medico opens the episode and signs the PE template.
     const episode = await call('POST', '/v1/salud/episodes', MEDICO, {
@@ -693,9 +790,11 @@ describe('salud API e2e (local stack)', () => {
     });
     assert.equal(episode.status, 201, JSON.stringify(episode.body));
     const episodeId = String(episode.body.id);
+    assert.equal((await episodeVisible(episodeId)).status, 200, 'the episode is committed');
     const consent = await createConsent(MEDICO, episodeId, { patientId, docNumber: documentNumber });
     assert.equal(consent.status, 201, JSON.stringify(consent.body));
-    const signed = await call('POST', `/v1/salud/consents/${String(consent.body.id)}/sign`, MEDICO, {
+    assert.notEqual(await consentVisible(String(consent.body.id)), null, 'the consent is committed');
+    const signed = await writeEventually('POST', `/v1/salud/consents/${String(consent.body.id)}/sign`, MEDICO, {
       evidenceSha256: CONSENT_SHA256,
     });
     assert.equal(signed.status, 200, JSON.stringify(signed.body));
@@ -712,7 +811,7 @@ describe('salud API e2e (local stack)', () => {
     assert.equal(appointment.status, 201, JSON.stringify(appointment.body));
 
     // 4. Atención — the consultation closes the episode.
-    const closed = await call('PATCH', `/v1/salud/episodes/${episodeId}`, MEDICO);
+    const closed = await writeEventually('PATCH', `/v1/salud/episodes/${episodeId}`, MEDICO);
     assert.equal(closed.status, 200);
     assert.equal(closed.body.status, 'closed');
 
@@ -734,7 +833,9 @@ describe('salud API e2e (local stack)', () => {
       cashSessionId: sessionId,
     };
     const idempotencyKey = `e2e-${randomUUID()}`;
-    const invoice = await call('POST', '/v1/billing/invoices/issue', CAJA, body, {
+    // The cash-session 201 commits on `finish`; retry only a transient 404.
+    // Same key + same body, so a retry cannot double-issue.
+    const invoice = await writeEventually('POST', '/v1/billing/invoices/issue', CAJA, body, {
       'idempotency-key': idempotencyKey,
     });
     assert.equal(invoice.status, 201, JSON.stringify(invoice.body));
@@ -777,7 +878,8 @@ describe('salud API e2e (local stack)', () => {
     assert.equal(storedCount, 1, 'the replay did not write a second invoice');
 
     // Payment: partial then the remainder, each step audited.
-    const partial = await call('POST', `/v1/billing/invoices/${invoiceId}/pay`, CAJA, {
+    assert.equal((await invoiceVisible(invoiceId)).status, 200, 'the invoice is committed');
+    const partial = await writeEventually('POST', `/v1/billing/invoices/${invoiceId}/pay`, CAJA, {
       method: 'efectivo',
       amount: 50,
     });
@@ -785,7 +887,7 @@ describe('salud API e2e (local stack)', () => {
     assert.equal(partial.body.status, 'partially_paid');
     assert.equal((await auditByTraceEventually(partial.traceId, 2))[0]?.action !== undefined, true);
 
-    const settled = await call('POST', `/v1/billing/invoices/${invoiceId}/pay`, CAJA, {
+    const settled = await writeEventually('POST', `/v1/billing/invoices/${invoiceId}/pay`, CAJA, {
       method: 'yape',
       amount: 68,
       externalRef: 'E2E-1',
@@ -796,7 +898,8 @@ describe('salud API e2e (local stack)', () => {
     assert.deepEqual(payAudit, ['invoice.paid', 'payment.registered']);
 
     // Read back: fiscal status/payload plus the registered payments.
-    const read = await call('GET', `/v1/billing/invoices/${invoiceId}`, CAJA);
+    // Poll: the second payment commits on `finish`, after its 201 is read.
+    const read = await getByIdEventually(`/v1/billing/invoices/${invoiceId}`, CAJA);
     assert.equal(read.status, 200, JSON.stringify(read.body));
     assert.equal(read.body.status, 'paid');
     assert.equal(read.body.fiscalStatus, 'pending');
@@ -811,7 +914,8 @@ describe('salud API e2e (local stack)', () => {
     const session = await call('POST', '/v1/billing/cash-sessions/open', CAJA, { orgNodeId: SEDE_A });
     assert.equal(session.status, 201, JSON.stringify(session.body));
     const sessionId = String(session.body.id);
-    const closed = await call('POST', '/v1/billing/cash-sessions/close', CAJA, {
+    // The open commits on `finish`; retry only a transient 404 on close.
+    const closed = await writeEventually('POST', '/v1/billing/cash-sessions/close', CAJA, {
       cashSessionId: sessionId,
       totals: { efectivo: 0 },
     });
