@@ -26,6 +26,7 @@ export async function RouteGuard({ path, children }: RouteGuardProps): Promise<R
         reason={guard.session.identity.reason}
         message={guard.session.identity.message}
         traceId={guard.traceId}
+        status={401}
       />
     );
   }
@@ -36,6 +37,8 @@ export async function RouteGuard({ path, children }: RouteGuardProps): Promise<R
         reason={guard.decision.reason}
         traceId={guard.traceId}
         role={guard.role}
+        code="access.denied"
+        status={403}
         {...(guard.decision.denied[0] === undefined ? {} : { action: guard.decision.denied[0] })}
       />
     );
