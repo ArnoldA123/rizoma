@@ -13,6 +13,7 @@ import {
   firstIssue,
   importJobIsClean,
   type FieldCheck,
+  type ImportJobListItem,
   type ImportJobRecord,
   type ObrasImportKind,
 } from '@rizoma/contracts';
@@ -29,6 +30,7 @@ import { formatUtcStamp, shortId } from '@/lib/format';
 import { importJobStatusLabel, obrasImportKindLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { fetchObrasImportErrorsCsv, getImportJob, importAssetsCsv, importWorkersCsv } from '@/lib/obras-api';
+import { listImportJobs } from '@/lib/imports-api';
 import { listOrgNodes } from '@/lib/org-api';
 import { saveTextFile } from '@/lib/salud-download';
 import { cn } from '@/lib/utils';
@@ -87,6 +89,17 @@ const SAMPLE_BY_KIND: Record<ObrasImportKind, string> = {
   [IMPORT_JOB_KIND_ASSETS_CSV]: `${ASSETS_CSV_COLUMNS.join(',')}\nEX-01,maquinaria,SN-0001,128.5,`,
 };
 
+/**
+ * Visible label of a job option: kind, status, date and counters. The id
+ * travels as the option value and never reaches the visible text.
+ */
+function jobItemLabel(row: ImportJobListItem): string {
+  return (
+    `${obrasImportKindLabel(row.kind)} · ${importJobStatusLabel(row.status)} · ` +
+    `${formatUtcStamp(row.createdAt)} · ${row.rowsOk} aceptadas / ${row.rowsError} rechazadas`
+  );
+}
+
 export function ObrasImportsPanel({
   canImportWorkers,
   canImportAssets,
@@ -107,6 +120,9 @@ export function ObrasImportsPanel({
   const [lookupId, setLookupId] = useState('');
   const [lookupFailure, setLookupFailure] = useState<ApiFailure | null>(null);
   const [lookupBusy, setLookupBusy] = useState(false);
+  const [jobItems, setJobItems] = useState<readonly EntityItem[]>([]);
+  const [jobListFailed, setJobListFailed] = useState(false);
+  const [jobsToken, setJobsToken] = useState(0);
   const [download, setDownload] = useState<DownloadState>({ kind: 'idle' });
   const fileInput = useRef<HTMLInputElement>(null);
   const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
@@ -127,6 +143,26 @@ export function ObrasImportsPanel({
       controller.abort();
     };
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listImportJobs({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setJobItems(rows.map((row) => ({ id: row.id, label: jobItemLabel(row) })));
+        setJobListFailed(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setJobItems([]);
+        setJobListFailed(true);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [jobsToken]);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     csv: csv.trim() === '' ? { field: 'csv', code: 'required' } : null,
@@ -155,6 +191,7 @@ export function ObrasImportsPanel({
           : await importAssetsCsv(body);
       setJob(result);
       setDownload({ kind: 'idle' });
+      setJobsToken((token) => token + 1);
     } catch (error) {
       setFailure(classifyApiError(error));
     } finally {
@@ -352,26 +389,48 @@ export function ObrasImportsPanel({
         </CardHeader>
 
         <CardContent className="flex flex-col gap-4">
-          <form className="flex flex-wrap items-center gap-3" onSubmit={handleLookup} noValidate>
-            <label htmlFor="obras-import-job-id" className="sr-only">
-              Identificador del job
-            </label>
-            <Input
-              id="obras-import-job-id"
-              className="font-mono text-xs sm:max-w-sm"
-              spellCheck={false}
-              placeholder="UUID del job"
-              value={lookupId}
-              onChange={(event) => setLookupId(event.target.value)}
-            />
-            <Button variant="outline" size="sm" type="submit" disabled={lookupBusy}>
-              {lookupBusy ? 'Consultando…' : 'Consultar job'}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              La importación de obras no tiene listado de jobs en MVP1: el identificador se conserva
-              para auditar una carga anterior.
-            </span>
-          </form>
+          {jobListFailed ? (
+            <form className="flex flex-wrap items-center gap-3" onSubmit={handleLookup} noValidate>
+              <label htmlFor="obras-import-job-id" className="sr-only">
+                Identificador del job
+              </label>
+              <Input
+                id="obras-import-job-id"
+                className="font-mono text-xs sm:max-w-sm"
+                spellCheck={false}
+                placeholder="UUID del job"
+                value={lookupId}
+                onChange={(event) => setLookupId(event.target.value)}
+              />
+              <Button variant="outline" size="sm" type="submit" disabled={lookupBusy}>
+                {lookupBusy ? 'Consultando…' : 'Consultar job'}
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                La lista de jobs no se pudo leer, así que el identificador se escribe a mano. El
+                identificador de una carga anterior sigue sirviendo para auditarla.
+              </span>
+            </form>
+          ) : (
+            <form className="flex flex-wrap items-end gap-3" onSubmit={handleLookup} noValidate>
+              <EntitySelector
+                label="Job de importación"
+                items={jobItems}
+                value={lookupId === '' ? null : lookupId}
+                onChange={(id) => setLookupId(id ?? '')}
+                placeholder="Seleccionar job…"
+                searchPlaceholder="Buscar por tipo o estado…"
+                disabled={lookupBusy}
+                className="min-w-72 flex-1"
+              />
+              <Button variant="outline" size="sm" type="submit" disabled={lookupBusy}>
+                {lookupBusy ? 'Consultando…' : 'Consultar job'}
+              </Button>
+              <span className="w-full text-xs text-muted-foreground">
+                Los jobs más recientes primero. Cada opción indica tipo, estado, fecha y contadores;
+                el identificador queda como valor de la opción y nunca se muestra.
+              </span>
+            </form>
+          )}
 
           {lookupFailure === null ? null : (
             <FailurePanel title="No se pudo leer el job" failure={lookupFailure} />

@@ -36,6 +36,8 @@ import {
   importWorkersCsv,
   listAssets,
   listAttendance,
+  listBudgetLines,
+  listCrews,
   listInventoryItems,
   listProgressEntries,
   listSiteLogs,
@@ -348,4 +350,23 @@ test('descarga de errores: una corrida limpia no ofrece botón', async () => {
     })) as typeof fetch;
 
   assert.equal(await fetchObrasImportErrorsCsv(SITE), null);
+});
+
+test('lecturas P2: cuadrillas y líneas van por /api/proxy con filtros omitidos si vacíos', async () => {
+  const { calls } = stubFetch([]);
+  await listCrews();
+  await listCrews({ orgNodeId: SITE });
+  await listBudgetLines(SITE);
+  await listBudgetLines(SITE, { active: true });
+
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [
+      `${PROXY_BASE_PATH}/obras/crews`,
+      `${PROXY_BASE_PATH}/obras/crews?orgNodeId=${SITE}`,
+      `${PROXY_BASE_PATH}/obras/progress/budget-lines?site=${SITE}`,
+      `${PROXY_BASE_PATH}/obras/progress/budget-lines?site=${SITE}&active=true`,
+    ],
+  );
+  for (const call of calls) assert.equal(call.init?.method, 'GET');
 });

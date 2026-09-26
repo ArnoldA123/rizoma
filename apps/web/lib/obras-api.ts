@@ -42,6 +42,7 @@ import {
   budgetLineListSchema,
   budgetLineRecordSchema,
   companyBoardSchema,
+  crewListSchema,
   importJobRecordSchema,
   inventoryItemListSchema,
   inventoryItemRecordSchema,
@@ -81,6 +82,8 @@ import {
   type BudgetLineRecord,
   type BudgetLineWithItem,
   type CompanyBoard,
+  type CrewListQuery,
+  type CrewRecord,
   type ImportJobRecord,
   type InventoryItemRecord,
   type ItemCreateInput,
@@ -203,6 +206,29 @@ export function closeAssignment(siteId: string, userId: string): Promise<Assignm
     {},
     assignmentRecordSchema,
   );
+}
+
+// ============ crews ============
+
+/** Filters of `GET /v1/obras/crews` — the query fields the screen may set. */
+export interface ListCrewsQuery extends CrewListQuery {}
+
+/**
+ * `GET /v1/obras/crews` — crews inside the membership subtree, alphabetical
+ * by name, capped at 200 rows. Every filter is optional; an unset filter is
+ * omitted from the query. The screen renders `name` and keeps `id` as the
+ * option value: the identifier never reaches the visible label.
+ */
+export function listCrews(query: ListCrewsQuery = {}, signal?: AbortSignal): Promise<CrewRecord[]> {
+  const params = new URLSearchParams();
+  if (query.orgNodeId !== undefined && query.orgNodeId !== null && query.orgNodeId !== '') {
+    params.set('orgNodeId', query.orgNodeId);
+  }
+  if (query.active !== undefined && query.active !== null) {
+    params.set('active', query.active ? 'true' : 'false');
+  }
+  const suffix = params.size === 0 ? '' : `?${params.toString()}`;
+  return readList(`${BASE}/crews${suffix}`, crewListSchema, signal);
 }
 
 // ============ attendance ============

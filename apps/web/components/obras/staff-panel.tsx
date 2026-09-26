@@ -21,7 +21,7 @@ import { MagneticCta } from '@/components/ui/magnetic';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { SITE_ROLE_SUGGESTIONS } from '@/lib/labels';
-import { assignWorker, closeAssignment } from '@/lib/obras-api';
+import { assignWorker, closeAssignment, listCrews } from '@/lib/obras-api';
 import { listUsers } from '@/lib/users-api';
 import type { Resource } from '@/lib/use-resource';
 import { formatUtcDate } from '@/lib/salud-time';
@@ -69,6 +69,7 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [workerItems, setWorkerItems] = useState<readonly EntityItem[]>([]);
+  const [crewItems, setCrewItems] = useState<readonly EntityItem[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -80,6 +81,23 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
       })
       .catch(() => {
         if (active) setWorkerItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listCrews({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setCrewItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setCrewItems([]);
       });
     return () => {
       active = false;
@@ -235,17 +253,20 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
                 />
                 <FieldMessage issue={checks.userId ?? null} touched={show('userId')} validLabel="Dato aceptado." />
               </div>
-              <LiveField id="staff-crew" label="Cuadrilla (opcional)" issue={checks.crewId ?? null} touched={show('crewId')}>
-                <Input
-                  id="staff-crew"
-                  className="font-mono text-xs"
-                  spellCheck={false}
-                  placeholder="UUID de cuadrilla"
-                  value={draft.crewId}
-                  onChange={(event) => set('crewId', event.target.value)}
-                  onBlur={() => touch('crewId')}
+              <div className="flex flex-col gap-1.5">
+                <EntitySelector
+                  label="Cuadrilla (opcional)"
+                  items={crewItems}
+                  value={draft.crewId === '' ? null : draft.crewId}
+                  onChange={(id) => {
+                    set('crewId', id ?? '');
+                    touch('crewId');
+                  }}
+                  placeholder="Sin cuadrilla"
+                  searchPlaceholder="Buscar por nombre…"
                 />
-              </LiveField>
+                <FieldMessage issue={checks.crewId ?? null} touched={show('crewId')} validLabel="Dato aceptado." />
+              </div>
               <LiveField id="staff-role" label="Rol en la obra" issue={checks.roleInSite ?? null} touched={show('roleInSite')}>
                 <Input
                   id="staff-role"

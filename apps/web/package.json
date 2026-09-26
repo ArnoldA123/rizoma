@@ -12,7 +12,7 @@
     "start": "next start --port 3000",
     "lint": "echo \"[web] lint — no linter configured; typecheck is the gate\"",
     "typecheck": "npm run build --workspace @rizoma/contracts && tsc -p tsconfig.json --noEmit",
-    "test": "npm run build --workspace @rizoma/contracts && node --test test/access.test.ts test/tenant.test.ts test/api-client.test.ts test/proxy.test.ts test/obras-api.test.ts test/obras-query.test.ts test/board-cache.test.ts test/board-compare.test.ts test/salud-download.test.ts test/salud-select.test.ts test/session-codec.test.ts test/refresh.test.ts test/middleware.test.ts test/session.test.ts test/page-guard.test.ts test/entity-select.test.ts"
+    "test": "npm run build --workspace @rizoma/contracts && node --test test/access.test.ts test/tenant.test.ts test/api-client.test.ts test/proxy.test.ts test/obras-api.test.ts test/obras-query.test.ts test/board-cache.test.ts test/board-compare.test.ts test/salud-download.test.ts test/salud-select.test.ts test/session-codec.test.ts test/refresh.test.ts test/middleware.test.ts test/session.test.ts test/page-guard.test.ts test/entity-select.test.ts test/p2-lists.test.ts"
   },
   "dependencies": {
     "@rizoma/contracts": "*",

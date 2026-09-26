@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
   PATIENTS_CSV_COLUMNS,
   PATIENTS_CSV_REQUIRED_COLUMNS,
@@ -8,12 +8,14 @@ import {
   firstIssue,
   importJobIsClean,
   type FieldCheck,
+  type ImportJobListItem,
   type ImportJobRecord,
 } from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
-import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
+import { FieldMessage } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
@@ -22,6 +24,8 @@ import { formatUtcStamp, shortId } from '@/lib/format';
 import { importJobStatusLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { fetchImportErrorsCsv, getImportJob, importPatientsCsv } from '@/lib/salud-api';
+import { listImportJobs } from '@/lib/imports-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { saveTextFile } from '@/lib/salud-download';
 import { cn } from '@/lib/utils';
 
@@ -57,6 +61,26 @@ type DownloadState =
   | { readonly kind: 'done'; readonly filename: string }
   | { readonly kind: 'failure'; readonly failure: ApiFailure };
 
+/** Name of an import job kind, falling back to the raw value. */
+const IMPORT_KIND_LABELS: Record<string, string> = {
+  patients_csv: 'Pacientes',
+};
+
+function importKindLabel(kind: string): string {
+  return IMPORT_KIND_LABELS[kind] ?? kind;
+}
+
+/**
+ * Visible label of a job option: kind, status, date and counters. The id
+ * travels as the option value and never reaches the visible text.
+ */
+function jobItemLabel(row: ImportJobListItem): string {
+  return (
+    `${importKindLabel(row.kind)} · ${importJobStatusLabel(row.status)} · ` +
+    `${formatUtcStamp(row.createdAt)} · ${row.rowsOk} aceptadas / ${row.rowsError} rechazadas`
+  );
+}
+
 export function ImportsPanel({ className }: ImportsPanelProps) {
   const [csv, setCsv] = useState('');
   const [orgNodeId, setOrgNodeId] = useState(DEV_IDENTITY.orgNodeId);
@@ -68,12 +92,53 @@ export function ImportsPanel({ className }: ImportsPanelProps) {
   const [lookupFailure, setLookupFailure] = useState<ApiFailure | null>(null);
   const [lookupBusy, setLookupBusy] = useState(false);
   const [download, setDownload] = useState<DownloadState>({ kind: 'idle' });
+  const [jobItems, setJobItems] = useState<readonly EntityItem[]>([]);
+  const [jobListFailed, setJobListFailed] = useState(false);
+  const [jobsToken, setJobsToken] = useState(0);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     csv: csv.trim() === '' ? { field: 'csv', code: 'required' } : null,
     orgNodeId: checkUuidField('orgNodeId', orgNodeId),
   };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listImportJobs({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setJobItems(rows.map((row) => ({ id: row.id, label: jobItemLabel(row) })));
+        setJobListFailed(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setJobItems([]);
+        setJobListFailed(true);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [jobsToken]);
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     const file = event.target.files?.[0];
@@ -93,6 +158,7 @@ export function ImportsPanel({ className }: ImportsPanelProps) {
       const result = await importPatientsCsv({ csv, orgNodeId: orgNodeId.trim() });
       setJob(result);
       setDownload({ kind: 'idle' });
+      setJobsToken((token) => token + 1);
     } catch (error) {
       setFailure(classifyApiError(error));
     } finally {
@@ -158,24 +224,23 @@ export function ImportsPanel({ className }: ImportsPanelProps) {
         <CardContent>
           <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="import-org-node" className="text-[0.8125rem] font-medium">
-                Sede de la importación (UUID)
-              </label>
-              <Input
-                id="import-org-node"
-                className="font-mono text-xs"
-                spellCheck={false}
-                value={orgNodeId}
+              <EntitySelector
+                label="Sede de la importación"
+                items={sedeItems}
+                value={orgNodeId === '' ? null : orgNodeId}
+                onChange={(id) => {
+                  setOrgNodeId(id ?? '');
+                  setTouched(true);
+                }}
+                placeholder="Seleccionar sede…"
+                searchPlaceholder="Buscar por nombre…"
                 disabled={saving}
-                onChange={(event) => setOrgNodeId(event.target.value)}
-                onBlur={() => setTouched(true)}
-                {...fieldStateProps(checks.orgNodeId ?? null, touched)}
               />
               <p className="text-xs text-muted-foreground">
                 Una fila puede declarar su propio <code className="font-mono">org_node_id</code>; la
                 sede de la solicitud es la del resto.
               </p>
-              <FieldMessage issue={checks.orgNodeId ?? null} touched={touched} />
+              <FieldMessage issue={checks.orgNodeId ?? null} touched={touched} validLabel="Sede aceptada." />
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -248,25 +313,48 @@ export function ImportsPanel({ className }: ImportsPanelProps) {
         </CardHeader>
 
         <CardContent className="flex flex-col gap-4">
-          <form className="flex flex-wrap items-center gap-3" onSubmit={handleLookup} noValidate>
-            <label htmlFor="import-job-id" className="sr-only">
-              Identificador del job
-            </label>
-            <Input
-              id="import-job-id"
-              className="font-mono text-xs sm:max-w-sm"
-              spellCheck={false}
-              placeholder="UUID del job"
-              value={lookupId}
-              onChange={(event) => setLookupId(event.target.value)}
-            />
-            <Button variant="outline" size="sm" type="submit" disabled={lookupBusy}>
-              {lookupBusy ? 'Consultando…' : 'Consultar job'}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              El identificador se conserva para auditar una carga anterior.
-            </span>
-          </form>
+          {jobListFailed ? (
+            <form className="flex flex-wrap items-center gap-3" onSubmit={handleLookup} noValidate>
+              <label htmlFor="import-job-id" className="sr-only">
+                Identificador del job
+              </label>
+              <Input
+                id="import-job-id"
+                className="font-mono text-xs sm:max-w-sm"
+                spellCheck={false}
+                placeholder="UUID del job"
+                value={lookupId}
+                onChange={(event) => setLookupId(event.target.value)}
+              />
+              <Button variant="outline" size="sm" type="submit" disabled={lookupBusy}>
+                {lookupBusy ? 'Consultando…' : 'Consultar job'}
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                La lista de jobs no se pudo leer, así que el identificador se escribe a mano. El
+                identificador de una carga anterior sigue sirviendo para auditarla.
+              </span>
+            </form>
+          ) : (
+            <form className="flex flex-wrap items-end gap-3" onSubmit={handleLookup} noValidate>
+              <EntitySelector
+                label="Job de importación"
+                items={jobItems}
+                value={lookupId === '' ? null : lookupId}
+                onChange={(id) => setLookupId(id ?? '')}
+                placeholder="Seleccionar job…"
+                searchPlaceholder="Buscar por tipo o estado…"
+                disabled={lookupBusy}
+                className="min-w-72 flex-1"
+              />
+              <Button variant="outline" size="sm" type="submit" disabled={lookupBusy}>
+                {lookupBusy ? 'Consultando…' : 'Consultar job'}
+              </Button>
+              <span className="w-full text-xs text-muted-foreground">
+                Los jobs más recientes primero. Cada opción indica tipo, estado, fecha y contadores;
+                el identificador queda como valor de la opción y nunca se muestra.
+              </span>
+            </form>
+          )}
 
           {lookupFailure === null ? null : (
             <FailurePanel title="No se pudo leer el job" failure={lookupFailure} />
