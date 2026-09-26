@@ -15,11 +15,11 @@ import { primaryRole } from '@/lib/tenant';
 /**
  * Home — the W1 landing screen.
  *
- * It does three jobs and no more: it proves the session and tenant are resolved
- * (with their source), it proves the API is reachable, and it shows exactly
- * which sections and actions the role holds. The capability list is the visible
- * form of the guard mirror, which is what makes "caja nunca ve clínica"
- * checkable by looking at the screen rather than reading the code.
+ * It does three jobs and no more: it confirms the session is active, it shows
+ * whether the service answers, and it shows exactly which sections and actions
+ * the role holds. Machine facts (ids, claims, codes, file paths) live only
+ * inside a collapsed detail, never in the visible body. The per-role layout
+ * is P3's work; this screen keeps its current structure on purpose.
  */
 export const dynamic = 'force-dynamic';
 
@@ -49,12 +49,7 @@ export default async function HomePage() {
       <PageHeader
         eyebrow="MVP1 · base web + autenticación + contratos"
         title={`Sesión de ${roleLabel(role)}`}
-        description="El contexto de tenant sale del token (claim tenant_id, con azp como respaldo) o, solo en desarrollo, de las cabeceras locales. El API sigue siendo la autoridad de cada decisión."
-        badges={[
-          session.usingDevFallback ? 'identidad local de desarrollo' : 'sesión Keycloak',
-          `tenant ${identity.tenantId.slice(0, 8)}…`,
-          `usuario ${identity.userId.slice(0, 8)}…`,
-        ]}
+        description="Su sesión está activa y el servicio ya verificó su acceso. Aquí ve las pantallas y acciones que permite su rol."
       />
 
       <ApiStatusCard />
@@ -107,10 +102,8 @@ export default async function HomePage() {
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <p className="text-muted-foreground">
-              Espejo de <code className="font-mono text-xs">auth/policy.ts</code> y{' '}
-              <code className="font-mono text-xs">auth/guard.ts</code>. Denegación por defecto:
-              cualquier acción ausente no se ofrece y, si se fuerza, el API responde 403 con{' '}
-              <code className="font-mono text-xs">access.denied</code>.
+              Solo ve lo que su rol permite. Si falta una acción, no se ofrece; si se fuerza,
+              el servicio la deniega.
             </p>
             <div className="flex flex-wrap gap-2">
               {ACTION_CODES.map((action) => {
@@ -120,7 +113,6 @@ export default async function HomePage() {
                     key={action}
                     variant={granted ? 'tinted' : 'outline'}
                     className={granted ? undefined : 'opacity-60 line-through'}
-                    title={action}
                   >
                     {ACTION_LABELS[action]}
                   </Badge>
@@ -131,6 +123,14 @@ export default async function HomePage() {
               {grantedActions.length} de {ACTION_CODES.length} acciones · rol{' '}
               {role === null ? 'sin resolver' : roleLabel(role)}
             </p>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                Copiar detalle
+              </summary>
+              <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                {`auth/policy.ts · auth/guard.ts\naccess.denied`}
+              </pre>
+            </details>
           </CardContent>
         </Card>
       </section>
@@ -142,15 +142,17 @@ export default async function HomePage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-2 text-muted-foreground">
           <p>
-            Las respuestas del API se validan con los esquemas Zod de{' '}
-            <code className="font-mono text-xs">@rizoma/contracts</code> antes de llegar a la
-            pantalla: fichas, episodios, citas, consentimientos, facturación, obras y tableros.
+            Los datos se verifican antes de mostrarse en pantalla. Si algo llega incompleto,
+            se avisa en lugar de mostrar datos a medias.
           </p>
-          <p>
-            Una forma inesperada falla en el borde con{' '}
-            <code className="font-mono text-xs">api.contract_mismatch</code> en lugar de propagarse
-            como datos incompletos hacia la interfaz.
-          </p>
+          <details className="text-xs">
+            <summary className="cursor-pointer underline underline-offset-2">
+              Copiar detalle
+            </summary>
+            <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+              {`@rizoma/contracts (zod)\napi.contract_mismatch`}
+            </pre>
+          </details>
         </CardContent>
       </Card>
     </div>

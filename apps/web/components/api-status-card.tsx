@@ -1,4 +1,3 @@
-import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { IconActivity } from '@/components/ui/icons';
 import { API_ORIGIN } from '@/lib/server-config';
@@ -6,11 +5,10 @@ import { API_ORIGIN } from '@/lib/server-config';
 /**
  * API reachability card.
  *
- * It probes the one route the API serves outside the `/v1` prefix (`/health`,
- * excluded from the global prefix in `main.ts`) directly from the server. That
- * makes the card a real readiness signal for the demo — and it is also what
- * proves `/health` is reachable without a tenant, which is exactly the
- * behaviour the proxy's `resolveUpstreamPath` has to reproduce.
+ * The visible body stays plain language (available or not, who to tell). The
+ * probe facts — origin, `/health`, HTTP status, per-check states and trace id
+ * — render only inside the collapsed detail. The card itself stays on screen;
+ * removing it is P3's call, not P1's.
  */
 
 interface HealthChecks {
@@ -56,38 +54,42 @@ async function probe(): Promise<ProbeResult> {
   }
 }
 
-function checkBadge(name: string, state: string | undefined) {
-  const up = state === 'up';
-  return (
-    <Badge key={name} variant={up ? 'tinted' : 'danger'}>
-      {name}: {state ?? 'sin dato'}
-    </Badge>
-  );
-}
-
 export async function ApiStatusCard() {
   const result = await probe();
   const checks = result.payload?.checks ?? {};
+  const detail = [
+    `origin: ${API_ORIGIN}/health`,
+    `status: ${result.detail}`,
+    `api: ${checks.api ?? '—'}`,
+    `postgres: ${checks.postgres ?? '—'}`,
+    `redis: ${checks.redis ?? '—'}`,
+    `traceId: ${result.payload?.traceId ?? result.traceId}`,
+  ].join('\n');
 
   return (
     <Card>
       <CardHeader>
-        <CardEyebrow>Runtime</CardEyebrow>
+        <CardEyebrow>Servicio</CardEyebrow>
         <CardTitle as="h2" className="flex items-center gap-2">
           <IconActivity className={result.reachable ? 'text-accent' : 'text-danger'} />
-          API {result.reachable ? 'alcanzable' : 'no alcanzable'}
+          {result.reachable ? 'Servicio disponible' : 'Servicio no disponible'}
         </CardTitle>
         <CardDescription>
-          <span className="tabular font-mono text-xs">{API_ORIGIN}/health</span> · {result.detail}
+          {result.reachable
+            ? 'El servicio responde con normalidad.'
+            : 'No pudimos contactar el servicio. Avise a soporte.'}
         </CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-wrap items-center gap-2">
-        {checkBadge('api', checks.api)}
-        {checkBadge('postgres', checks.postgres)}
-        {checkBadge('redis', checks.redis)}
-        <span className="tabular ml-auto font-mono text-[0.6875rem] text-muted-foreground">
-          {result.payload?.traceId ?? result.traceId}
-        </span>
+      <CardContent className="flex flex-col gap-2">
+        {result.reachable ? null : <p>Si el problema sigue, avise a soporte.</p>}
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+            Copiar detalle
+          </summary>
+          <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+            {detail}
+          </pre>
+        </details>
       </CardContent>
     </Card>
   );
