@@ -33,7 +33,7 @@ export default async function SaludPatientFilePage({
         eyebrow="Salud · ficha 360"
         title="Ficha del paciente"
         description="Cabecera con alergias y alertas primero, consentimientos con su matriz de grabación, episodios con apertura y cierre, citas del paciente y la cuenta como enlace."
-        badges={['salud', `id ${id.slice(0, 8)}…`]}
+        badges={['salud']}
       />
 
       <RouteGuard path="/salud/pacientes/[id]">
