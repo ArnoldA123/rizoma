@@ -1,8 +1,9 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { Suspense } from 'react';
 import { AppNav } from '@/components/app-nav';
 import { DisplayControls } from '@/components/display-controls';
-import { SessionChip } from '@/components/session-chip';
+import { SessionChip, SessionChipFallback } from '@/components/session-chip';
 import type { AppRoute, SkinId } from '@/lib/navigation';
 import { SECTION_LABELS } from '@/lib/labels';
 import { primaryRole } from '@/lib/tenant';
@@ -64,7 +65,11 @@ export function AppShell({ skin, pathname, route, session, children }: AppShellP
 
           <div className="ml-auto flex items-center gap-3">
             <DisplayControls />
-            <SessionChip session={session} />
+            {/* The chip streams name + sede past a 2.5 s upstream budget; the
+                fallback paints role + exit at once so the header never waits. */}
+            <Suspense fallback={<SessionChipFallback role={role} />}>
+              <SessionChip session={session} />
+            </Suspense>
           </div>
         </div>
       </header>

@@ -26,7 +26,7 @@ export default function SaludAgendaPage() {
         eyebrow="Salud · agenda"
         title="Agenda"
         description="Citas del día en UTC, vista por rol, actualización automática cada dos minutos y programación con validación en vivo."
-        badges={['W2', 'salud']}
+        badges={['salud']}
       />
 
       <RouteGuard path="/salud/agenda">

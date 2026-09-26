@@ -258,7 +258,7 @@ export default async function PoliticasPage({
         eyebrow="Auditoría · políticas"
         title="Políticas de acceso"
         description="Matriz rol × acción y probador por estado: solo lectura de lo que el código ya decide, sin constructor de reglas."
-        badges={['B5', 'solo lectura']}
+        badges={['solo lectura']}
       />
 
       <RouteGuard path="/politicas">

@@ -28,7 +28,7 @@ export default function ObrasImportsPage() {
         eyebrow="Obras · importaciones"
         title="Importar trabajadores y equipos"
         description="Carga por CSV con resumen del job, filas rechazadas descargables y clave de repetición por hash del archivo."
-        badges={['W5', 'obras']}
+        badges={['obras']}
       />
 
       <RouteGuard path="/obras/imports">

@@ -21,7 +21,7 @@ export default function OnboardingPage() {
         eyebrow="Arranque · alta inicial"
         title="Onboarding"
         description="Asistente de primer arranque en siete pasos: organización, sedes, identidad, facturación, administración, revisión y firma del acta."
-        badges={['H3', 'setup']}
+        badges={['setup']}
       />
 
       <OnboardingWizard />

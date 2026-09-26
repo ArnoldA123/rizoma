@@ -41,7 +41,7 @@ export default async function SaludBoardPage({
         eyebrow="Salud · tableros"
         title={`Tablero de ${boardRoleLabel(boardRole)}`}
         description="KPIs del día por rol, con lectura automática dentro de la banda de 1 a 5 minutos y caché de cliente."
-        badges={['W3', 'salud', boardRole]}
+        badges={['salud', boardRole]}
       />
 
       <RouteGuard path="/salud/tableros/[role]">

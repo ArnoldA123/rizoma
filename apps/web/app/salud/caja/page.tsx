@@ -25,7 +25,7 @@ export default function SaludCajaPage() {
         eyebrow="Salud · caja"
         title="Caja"
         description="Turno de caja, cotizaciones, emisión y cobro de comprobantes, y estado fiscal de cada documento."
-        badges={['W3', 'salud']}
+        badges={['salud']}
       />
 
       <RouteGuard path="/salud/caja">
