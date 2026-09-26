@@ -308,11 +308,20 @@ export function ProgressPanel({
             </div>
           </form>
         ) : (
-          <p className="text-xs text-muted-foreground">
-            Su rol no tiene <code className="font-mono">site.write</code>: las líneas de presupuesto y
-            los hitos no se ofrecen porque el API los respondería con{' '}
-            <code className="font-mono">obra.scope_denied</code>.
-          </p>
+          <div className="flex flex-col gap-2">
+            <p className="text-xs text-muted-foreground">
+              Su rol no puede crear líneas de presupuesto ni hitos en esta obra: esas opciones no
+              se ofrecen. Si necesita este acceso, avise a jefatura o a soporte.
+            </p>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                Copiar detalle
+              </summary>
+              <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                {`code: obra.scope_denied\nstatus: 403\naction: site.write`}
+              </pre>
+            </details>
+          </div>
         )}
 
         <div className="flex flex-col gap-4 border-t border-border pt-4">

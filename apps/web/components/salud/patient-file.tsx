@@ -245,12 +245,19 @@ export function PatientFile({
             </>
           ) : (
             <>
-              <Badge variant="outline">access.denied · reason role.denied</Badge>
               <span className="text-xs text-muted-foreground">
-                El rol {roleLabel(role)} no tiene <code className="font-mono">invoice.issue</code>:
-                la ruta de caja no se ofrece y el API respondería 403 con ese mismo motivo. Ningún
-                importe se renderiza en esta pantalla.
+                El rol {roleLabel(role)} no puede abrir la caja desde aquí: la opción no se ofrece
+                y ningún importe se muestra en esta pantalla. Si necesita este acceso, avise a
+                jefatura o a soporte.
               </span>
+              <details className="text-xs">
+                <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                  Copiar detalle
+                </summary>
+                <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                  {`code: access.denied\nreason: role.denied\nstatus: 403\naction: invoice.issue`}
+                </pre>
+              </details>
             </>
           )}
         </CardContent>

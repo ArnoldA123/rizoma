@@ -519,8 +519,18 @@ export function PatientForm({
             <p className="text-xs text-muted-foreground">
               {canOpenFile
                 ? 'La ficha ya se puede abrir desde la lista para completar consentimientos y episodios.'
-                : `El rol ${roleLabel(role)} registra y edita fichas, pero no las lee: abrirla exige patient.read, así que el enlace no se ofrece y el API respondería 403 con role.denied.`}
+                : `El rol ${roleLabel(role)} registra fichas pero no puede abrirlas después: el enlace no se ofrece y la ficha queda visible para los roles con permiso. Si necesita este acceso, avise a jefatura o a soporte.`}
             </p>
+            {canOpenFile ? null : (
+              <details className="text-xs">
+                <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                  Copiar detalle
+                </summary>
+                <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                  {`code: access.denied\nreason: role.denied\nstatus: 403\naction: patient.read`}
+                </pre>
+              </details>
+            )}
             <p className="tabular font-mono text-[0.6875rem] text-muted-foreground">
               id {created.id}
             </p>

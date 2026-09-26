@@ -198,11 +198,20 @@ export function SitesBrowser({ role, canWrite, defaultOrgNodeId }: SitesBrowserP
       {canWrite ? (
         <SiteForm defaultOrgNodeId={knownOrgNodeId} onCreated={handleCreated} />
       ) : (
-        <p className="text-xs text-muted-foreground">
-          {roleLabel(role)} no tiene <code className="font-mono">site.write</code>: el alta de obras
-          no se ofrece porque el API la respondería con <code className="font-mono">access.denied</code>{' '}
-          y <code className="font-mono">reason role.denied</code>.
-        </p>
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-muted-foreground">
+            {roleLabel(role)} no puede dar de alta obras: la opción no se ofrece. Si necesita este
+            acceso, avise a jefatura o a soporte.
+          </p>
+          <details className="text-xs">
+            <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+              Copiar detalle
+            </summary>
+            <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+              {`code: access.denied\nreason: role.denied\nstatus: 403\naction: site.write`}
+            </pre>
+          </details>
+        </div>
       )}
 
       {lastCreated === null ? null : (

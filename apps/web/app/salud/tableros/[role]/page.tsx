@@ -56,18 +56,25 @@ export default async function SaludBoardPage({
             >
               <p>
                 El tablero de {boardRoleLabel(boardRole)} solo lo abre quien tiene ese rol. El rol
-                activo es {roleLabel(guard.role)}: el API respondería 403 con{' '}
-                <code className="font-mono text-xs">reason role.denied</code> a esta misma solicitud,
-                así que la pantalla no la envía.
+                activo es {roleLabel(guard.role)}, por eso esta pantalla no muestra datos ni envía
+                la solicitud. Vuelva al tablero de su rol. Si necesita este acceso, avise a
+                jefatura o a soporte.
               </p>
-              <dl className="tabular mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                <dt className="text-muted-foreground">code</dt>
-                <dd className="font-mono text-danger">access.denied</dd>
-                <dt className="text-muted-foreground">reason</dt>
-                <dd className="font-mono">role.denied</dd>
-                <dt className="text-muted-foreground">traceId</dt>
-                <dd className="font-mono break-all">{guard.traceId}</dd>
-              </dl>
+              <details className="mt-3 text-xs">
+                <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                  Copiar detalle
+                </summary>
+                <dl className="tabular mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                  <dt className="text-muted-foreground">code</dt>
+                  <dd className="font-mono break-all">access.denied</dd>
+                  <dt className="text-muted-foreground">reason</dt>
+                  <dd className="font-mono break-all">role.denied</dd>
+                  <dt className="text-muted-foreground">status</dt>
+                  <dd className="font-mono break-all">403</dd>
+                  <dt className="text-muted-foreground">traceId</dt>
+                  <dd className="font-mono break-all">{guard.traceId}</dd>
+                </dl>
+              </details>
             </Alert>
           )
         }
