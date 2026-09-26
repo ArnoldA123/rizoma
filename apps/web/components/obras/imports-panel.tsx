@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
   ASSETS_CSV_COLUMNS,
   ASSETS_CSV_REQUIRED_COLUMNS,
@@ -19,7 +19,8 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
-import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
+import { FieldMessage } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { FailurePanel } from '@/components/ui/states';
@@ -28,6 +29,7 @@ import { formatUtcStamp, shortId } from '@/lib/format';
 import { importJobStatusLabel, obrasImportKindLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { fetchObrasImportErrorsCsv, getImportJob, importAssetsCsv, importWorkersCsv } from '@/lib/obras-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { saveTextFile } from '@/lib/salud-download';
 import { cn } from '@/lib/utils';
 
@@ -107,6 +109,24 @@ export function ObrasImportsPanel({
   const [lookupBusy, setLookupBusy] = useState(false);
   const [download, setDownload] = useState<DownloadState>({ kind: 'idle' });
   const fileInput = useRef<HTMLInputElement>(null);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     csv: csv.trim() === '' ? { field: 'csv', code: 'required' } : null,
@@ -241,18 +261,17 @@ export function ObrasImportsPanel({
 
           <form className="flex flex-col gap-4" onSubmit={handleSubmit} noValidate>
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="obras-import-org-node" className="text-[0.8125rem] font-medium">
-                Sede de la importación (UUID)
-              </label>
-              <Input
-                id="obras-import-org-node"
-                className="font-mono text-xs"
-                spellCheck={false}
-                value={orgNodeId}
+              <EntitySelector
+                label="Sede de la importación"
+                items={sedeItems}
+                value={orgNodeId === '' ? null : orgNodeId}
+                onChange={(id) => {
+                  setOrgNodeId(id ?? '');
+                  setTouched(true);
+                }}
+                placeholder="Seleccionar sede…"
+                searchPlaceholder="Buscar por nombre…"
                 disabled={saving}
-                onChange={(event) => setOrgNodeId(event.target.value)}
-                onBlur={() => setTouched(true)}
-                {...fieldStateProps(checks.orgNodeId ?? null, touched)}
               />
               <p className="text-xs text-muted-foreground">
                 Una fila puede declarar su propio <code className="font-mono">org_node_id</code>; la
@@ -261,7 +280,7 @@ export function ObrasImportsPanel({
                 <code className="font-mono">import.org_node_out_of_scope</code>, no como un fallo del
                 archivo.
               </p>
-              <FieldMessage issue={checks.orgNodeId ?? null} touched={touched} />
+              <FieldMessage issue={checks.orgNodeId ?? null} touched={touched} validLabel="Sede aceptada." />
             </div>
 
             <div className="flex flex-col gap-1.5">

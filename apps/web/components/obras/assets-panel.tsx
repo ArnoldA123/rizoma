@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
   ASSET_CODE_MAX,
   ASSET_KIND_MAX,
@@ -20,7 +20,8 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
-import { LiveField } from '@/components/ui/field-feedback';
+import { LiveField, FieldMessage } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -36,6 +37,7 @@ import {
   retireAsset,
   setAssetMaintenance,
 } from '@/lib/obras-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { useResource } from '@/lib/use-resource';
 
 /**
@@ -122,9 +124,37 @@ export function AssetsPanel({
   const [success, setSuccess] = useState<string | null>(null);
   /** Last unit this panel wrote, so the confirmation can state its open transitions. */
   const [lastAsset, setLastAsset] = useState<AssetRecord | null>(null);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   /** Scoped catalogue: units inside the membership subtree, capped at 200. */
   const catalogue = useResource<AssetRecord[]>('obras-assets', (signal) => listAssets(signal));
+  /** Scope options of the target field: catalogue codes with kind and serial. */
+  const assetOptions: readonly EntityItem[] = useMemo(
+    () =>
+      (catalogue.data ?? []).map((row) => ({
+        id: row.id,
+        label: row.code,
+        sub: `${row.kind} · serie ${row.serial}`,
+      })),
+    [catalogue.data],
+  );
   const rows = useMemo(() => {
     const all = catalogue.data ?? [];
     return [...all].sort((a, b) => {
@@ -201,7 +231,7 @@ export function AssetsPanel({
       setTouched({});
       setSubmitted(false);
       setSuccess(
-        `Unidad ${asset.code} registrada en estado «${assetStatusLabel(asset.status)}» bajo el nodo ${asset.orgNodeId}. El código es único en el tenant: repetirlo responde obra.duplicate.`,
+        `Unidad ${asset.code} registrada en estado «${assetStatusLabel(asset.status)}» bajo la sede ${sedeItems.find((item) => item.id === asset.orgNodeId)?.label ?? 'elegida'}. El código es único en el tenant: repetirlo responde obra.duplicate.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -323,24 +353,21 @@ export function AssetsPanel({
               la matriz de la demo solo gerencia lo tiene.
             </p>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <LiveField
-                id="asset-org"
-                label="Nodo de organización"
-                issue={registerChecks.orgNodeId ?? null}
-                touched={show('orgNodeId')}
-                hint="Sede del catálogo de equipos."
-              >
-                <Input
-                  id="asset-org"
-                  className="font-mono text-xs"
-                  spellCheck={false}
-                  value={register.orgNodeId}
-                  onChange={(event) =>
-                    setRegister((current) => ({ ...current, orgNodeId: event.target.value }))
-                  }
-                  onBlur={() => touch('orgNodeId')}
+              <div className="flex flex-col gap-1.5">
+                <EntitySelector
+                  label="Sede"
+                  items={sedeItems}
+                  value={register.orgNodeId === '' ? null : register.orgNodeId}
+                  onChange={(id) => {
+                    setRegister((current) => ({ ...current, orgNodeId: id ?? '' }));
+                    touch('orgNodeId');
+                  }}
+                  placeholder="Seleccionar sede…"
+                  searchPlaceholder="Buscar por nombre…"
                 />
-              </LiveField>
+                <FieldMessage issue={registerChecks.orgNodeId ?? null} touched={show('orgNodeId')} validLabel="Dato aceptado." />
+                <p className="text-xs text-muted-foreground">Sede del catálogo de equipos.</p>
+              </div>
               <LiveField
                 id="asset-code"
                 label="Código"
@@ -409,26 +436,22 @@ export function AssetsPanel({
         )}
 
         <div className="flex flex-col gap-4 border-t border-border pt-4">
-          <LiveField
-            id="asset-target"
-            label="Unidad objetivo (UUID)"
-            issue={targetIssue}
-            touched={show('assetId') || assetId !== ''}
-            hint="Se completa al elegir una fila de la tabla o un equipo en el tablero de la obra."
-          >
-            <Input
-              id="asset-target"
-              className="font-mono text-xs sm:max-w-md"
-              spellCheck={false}
-              placeholder="UUID del equipo"
-              value={assetId}
-              onChange={(event) => {
-                onAssetIdChange(event.target.value);
+          <div className="flex flex-col gap-1.5">
+            <EntitySelector
+              label="Unidad objetivo"
+              items={assetOptions}
+              value={assetId === '' ? null : assetId}
+              onChange={(id) => {
+                onAssetIdChange(id ?? '');
+                touch('assetId');
                 setSuccess(null);
               }}
-              onBlur={() => touch('assetId')}
+              placeholder="Seleccionar equipo…"
+              searchPlaceholder="Buscar por código…"
             />
-          </LiveField>
+            <FieldMessage issue={targetIssue} touched={show('assetId') || assetId !== ''} validLabel="Dato aceptado." />
+            <p className="text-xs text-muted-foreground">Se completa al elegir una fila de la tabla o un equipo en el tablero de la obra.</p>
+          </div>
 
           <div className="flex flex-wrap items-center gap-3">
             {canAssign ? (

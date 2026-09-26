@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import {
   SITE_ROLE_MAX,
   checkOptionalUuidField,
@@ -15,12 +15,14 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { FieldMessage } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { SITE_ROLE_SUGGESTIONS } from '@/lib/labels';
 import { assignWorker, closeAssignment } from '@/lib/obras-api';
+import { listUsers } from '@/lib/users-api';
 import type { Resource } from '@/lib/use-resource';
 import { formatUtcDate } from '@/lib/salud-time';
 
@@ -66,6 +68,24 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [workerItems, setWorkerItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listUsers({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setWorkerItems(rows.map((row) => ({ id: row.id, label: row.name, sub: row.email })));
+      })
+      .catch(() => {
+        if (active) setWorkerItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = useMemo(
     () => ({
@@ -104,8 +124,10 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
         roleInSite: draft.roleInSite.trim(),
       });
       staff.reloadSilently();
+      const workerName =
+        workerItems.find((item) => item.id === assignment.userId)?.label ?? assignment.userId;
       setSuccess(
-        `Asignación activa para ${assignment.userId} como ${assignment.roleInSite}. Si ya existía, el API devolvió la asignación en vigor sin duplicarla.`,
+        `Asignación activa para ${workerName} como ${assignment.roleInSite}. Si ya existía, el API devolvió la asignación en vigor sin duplicarla.`,
       );
       setDraft(EMPTY_DRAFT);
       setTouched({});
@@ -199,16 +221,20 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
               <code className="font-mono">obra.membership_required</code>.
             </p>
             <div className="grid gap-4 sm:grid-cols-3">
-              <LiveField id="staff-user" label="Trabajador (userId)" issue={checks.userId ?? null} touched={show('userId')}>
-                <Input
-                  id="staff-user"
-                  className="font-mono text-xs"
-                  spellCheck={false}
-                  value={draft.userId}
-                  onChange={(event) => set('userId', event.target.value)}
-                  onBlur={() => touch('userId')}
+              <div className="flex flex-col gap-1.5">
+                <EntitySelector
+                  label="Trabajador"
+                  items={workerItems}
+                  value={draft.userId === '' ? null : draft.userId}
+                  onChange={(id) => {
+                    set('userId', id ?? '');
+                    touch('userId');
+                  }}
+                  placeholder="Seleccionar trabajador…"
+                  searchPlaceholder="Buscar por nombre…"
                 />
-              </LiveField>
+                <FieldMessage issue={checks.userId ?? null} touched={show('userId')} validLabel="Dato aceptado." />
+              </div>
               <LiveField id="staff-crew" label="Cuadrilla (opcional)" issue={checks.crewId ?? null} touched={show('crewId')}>
                 <Input
                   id="staff-crew"
