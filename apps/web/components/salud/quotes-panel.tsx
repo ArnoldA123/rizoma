@@ -24,7 +24,7 @@ import {
   type BillingLineDraft,
 } from '@/components/salud/billing-lines-field';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states';
-import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
+import { formatPen, formatUtcStamp } from '@/lib/format';
 import { quoteStatusLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createQuote, listQuotes } from '@/lib/salud-api';
@@ -141,8 +141,10 @@ export function QuotesPanel({ defaultOrgNodeId, onIssueFromQuote, className }: Q
                   </div>
                   <span className="tabular text-xs text-muted-foreground">
                     {formatPen(quote.total)} · {quote.items.length} línea
-                    {quote.items.length === 1 ? '' : 's'} · {formatUtcStamp(quote.createdAt)} ·{' '}
-                    <span className="font-mono">{shortId(quote.id)}</span>
+                    {quote.items.length === 1 ? '' : 's'} · {formatUtcStamp(quote.createdAt)}
+                  </span>
+                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                    id {quote.id}
                   </span>
                 </div>
 
@@ -335,7 +337,7 @@ function QuoteForm({ defaultOrgNodeId, onCreated, onClose }: QuoteFormProps) {
         success={
           created === null
             ? null
-            : `Cotización ${shortId(created.id)} registrada por ${formatPen(created.total)}.`
+            : `Cotización de ${created.customerName} registrada por ${formatPen(created.total)}.`
         }
       />
     </form>

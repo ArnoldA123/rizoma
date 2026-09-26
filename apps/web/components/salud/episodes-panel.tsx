@@ -55,6 +55,29 @@ export function EpisodesPanel({ patientId, canWrite, resource, className }: Epis
   const [revertedId, setRevertedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  // Professional names for the rows: the episodes endpoint carries only the
+  // id, so it resolves in the browser. A failed read leaves the map empty
+  // and the row falls back to the short id.
+  const [professionalNames, setProfessionalNames] = useState<ReadonlyMap<string, string>>(
+    new Map(),
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listUsers({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setProfessionalNames(new Map(rows.map((row) => [row.id, row.name])));
+      })
+      .catch(() => {
+        if (active) setProfessionalNames(new Map());
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   // The rollback flash is a one-shot animation: the flag clears itself so a
   // second failure on the same row animates again.
@@ -185,13 +208,17 @@ export function EpisodesPanel({ patientId, canWrite, resource, className }: Epis
                         {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}
                       </Badge>
                     </div>
-                    <span className="tabular font-mono text-xs text-muted-foreground">
+                    <span className="tabular text-xs text-muted-foreground">
                       abierto {formatUtcDate(utcDateOf(episode.openedAt) ?? '')}
                       {episode.closedAt === null
                         ? ' · sin cierre'
                         : ` · cerrado ${formatUtcDate(utcDateOf(episode.closedAt) ?? '')}`}
-                      {' · profesional '}
-                      {episode.professionalId.slice(0, 8)}…
+                      {' · '}
+                      {professionalNames.get(episode.professionalId) ??
+                        'Profesional sin nombre en el alcance'}
+                    </span>
+                    <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                      profesional {episode.professionalId.slice(0, 8)}…
                     </span>
                   </div>
 

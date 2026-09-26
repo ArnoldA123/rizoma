@@ -25,7 +25,7 @@ import { requestJson } from '@/lib/api-client';
 import { listCashSessions } from '@/lib/salud-api';
 import { withSavedView } from '@/lib/views-api';
 import { DEV_IDENTITY } from '@/lib/config';
-import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
+import { formatPen, formatUtcStamp } from '@/lib/format';
 import {
   billingDocumentTypeLabel,
   fiscalStatusLabel,
@@ -347,8 +347,9 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
                 >
                   <div className="flex min-w-0 flex-col gap-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="tabular text-[0.9375rem] font-medium">
-                        {invoice.serie}-{String(invoice.numero).padStart(8, '0')}
+                      <span className="text-[0.9375rem] font-medium">
+                        {invoice.customerName} · {invoice.serie}-
+                        {String(invoice.numero).padStart(8, '0')}
                       </span>
                       <Badge variant={invoiceStatusVariant(invoice.status)}>
                         {invoiceStatusLabel(invoice.status)}
@@ -359,9 +360,10 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
                     </div>
                     <span className="tabular text-xs text-muted-foreground">
                       {billingDocumentTypeLabel(invoice.customerDocType)} {invoice.customerDocNumber} ·{' '}
-                      {invoice.customerName} · {formatPen(invoice.total)} ·{' '}
-                      {formatUtcStamp(invoice.issuedAt)} ·{' '}
-                      <span className="font-mono">{shortId(invoice.id)}</span>
+                      {formatPen(invoice.total)} · {formatUtcStamp(invoice.issuedAt)}
+                    </span>
+                    <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                      id {invoice.id}
                     </span>
                   </div>
                   <Button
@@ -406,8 +408,11 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
         <>
           {selected === null ? (
             <p className="text-xs text-muted-foreground">
-              Leyendo el comprobante <span className="font-mono">{shortId(selectedId)}</span> desde el
-              API. Si el identificador no existe en el alcance, el detalle responde 404 con su
+              Leyendo el comprobante{' '}
+              <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                {selectedId}
+              </span>{' '}
+              desde el API. Si el identificador no existe en el alcance, el detalle responde 404 con su
               envelope.
             </p>
           ) : null}

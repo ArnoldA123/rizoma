@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { AppointmentRecord, EpisodeRecord, PatientRecord } from '@rizoma/contracts';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -16,7 +16,8 @@ import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { IconAlertTriangle, IconArrowRight } from '@/components/ui/icons';
 import { documentTypeLabel, appointmentStatusLabel, appointmentStatusVariant, roleLabel } from '@/lib/labels';
 import { type ApiFailure } from '@/lib/salud-errors';
-import { getPatient, listAppointments, listEpisodes } from '@/lib/salud-api';
+import { getPatient, listAppointments, listEpisodes, listPatients } from '@/lib/salud-api';
+import { listUsers } from '@/lib/users-api';
 import { appointmentsOfPatient } from '@/lib/salud-select';
 import { formatUtcDate, utcDateOf, utcTimeRange } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
@@ -215,6 +216,7 @@ export function PatientFile({
 
       <PatientAppointments
         patientId={record.id}
+        patientName={record.personName}
         appointments={appointments.data}
         loading={appointments.loading}
         failure={appointments.failure}
@@ -268,6 +270,7 @@ export function PatientFile({
 
 interface PatientAppointmentsProps {
   readonly patientId: string;
+  readonly patientName: string;
   readonly appointments: AppointmentRecord[] | null;
   readonly loading: boolean;
   readonly failure: ApiFailure | null;
@@ -284,14 +287,53 @@ interface PatientAppointmentsProps {
  */
 function PatientAppointments({
   patientId,
+  patientName,
   appointments,
   loading,
   failure,
   onRetry,
 }: PatientAppointmentsProps) {
   const [showAll, setShowAll] = useState(false);
+  // The appointments endpoint carries only ids, so professional and patient
+  // names resolve in the browser against the scope lists. A failed auxiliary
+  // read leaves the map empty and the row falls back to the short id.
+  const [patientNames, setPatientNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const signal = controller.signal;
+    Promise.allSettled([listPatients(signal), listUsers({}, signal)]).then(
+      ([patients, users]) => {
+        if (!active) return;
+        if (patients.status === 'fulfilled') {
+          setPatientNames(new Map(patients.value.map((row) => [row.id, row.personName])));
+        }
+        if (users.status === 'fulfilled') {
+          setUserNames(new Map(users.value.map((row) => [row.id, row.name])));
+        }
+      },
+    );
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
   const mine = appointmentsOfPatient(appointments ?? [], patientId);
   const rows = showAll ? (appointments ?? []) : mine;
+  const professionalName = useMemo(
+    () =>
+      new Map(
+        (appointments ?? []).map((appointment) => [
+          appointment.id,
+          userNames.get(appointment.professionalId) ??
+            `Profesional ${appointment.professionalId.slice(0, 8)}…`,
+        ]),
+      ),
+    [appointments, userNames],
+  );
 
   return (
     <Card>
@@ -344,7 +386,14 @@ function PatientAppointments({
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <span className="tabular text-[0.8125rem]">
                     {formatUtcDate(utcDateOf(appointment.startsAt) ?? '')} ·{' '}
-                    {utcTimeRange(appointment.startsAt, appointment.durationMin)} UTC
+                    {utcTimeRange(appointment.startsAt, appointment.durationMin)} UTC ·{' '}
+                    {appointment.patientId === patientId
+                      ? patientName
+                      : (patientNames.get(appointment.patientId) ??
+                        `Paciente ${appointment.patientId.slice(0, 8)}…`)}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {professionalName.get(appointment.id) ?? 'Profesional sin nombre en el alcance'}
                   </span>
                   <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
                     profesional {appointment.professionalId.slice(0, 8)}… · paciente{' '}

@@ -15,7 +15,7 @@ import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle 
 import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
 import { FailurePanel } from '@/components/salud/states';
-import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
+import { formatPen, formatUtcStamp } from '@/lib/format';
 import { paymentMethodLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { closeCashSession, listCashSessions, openCashSession } from '@/lib/salud-api';
@@ -67,13 +67,19 @@ export function CashSessionPanel({
         {session === null ? null : (
           <dl className="tabular grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-border bg-secondary px-4 py-3 text-xs">
             <dt className="text-muted-foreground">turno</dt>
-            <dd className="font-mono break-all">{session.id}</dd>
+            <dd>
+              {formatUtcStamp(session.openedAt)} · {session.status === 'open' ? 'abierto' : 'cerrado'}
+            </dd>
             <dt className="text-muted-foreground">estado</dt>
             <dd>{session.status === 'open' ? 'abierto' : 'cerrado'}</dd>
             <dt className="text-muted-foreground">apertura</dt>
             <dd>{formatUtcStamp(session.openedAt)}</dd>
             <dt className="text-muted-foreground">cierre</dt>
             <dd>{formatUtcStamp(session.closedAt)}</dd>
+            <dt className="text-muted-foreground">id</dt>
+            <dd className="font-mono text-[0.6875rem] text-muted-foreground break-all">
+              {session.id}
+            </dd>
             {session.status === 'closed' ? (
               <>
                 <dt className="text-muted-foreground">arqueo</dt>
@@ -328,7 +334,7 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
         </Button>
         {closed === null ? null : (
           <span role="status" className="sd-rise text-xs text-muted-foreground">
-            Turno {shortId(closed.id)} cerrado el {formatUtcStamp(closed.closedAt)}.
+            Turno del {formatUtcStamp(closed.openedAt)} cerrado el {formatUtcStamp(closed.closedAt)}.
           </span>
         )}
       </div>
