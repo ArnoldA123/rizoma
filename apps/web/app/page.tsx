@@ -20,7 +20,7 @@ import { primaryRole } from '@/lib/tenant';
  * whether the service answers, and it shows exactly which sections and actions
  * the role holds. Machine facts (ids, claims, codes, file paths) live only
  * inside a collapsed detail, never in the visible body. The per-role day covers
- * for salud (médico, recepción, caja) live in `components/home/role-home` (P3-1a)
+ * for salud, obras and auditoría live in `components/home/role-home` (P3-1a/1b)
  * and this screen delegates to them; every other role keeps the current
  * structure below on purpose until P3-2 removes the infra cards.
  */
@@ -45,10 +45,20 @@ export default async function HomePage() {
   const identity = session.identity.identity;
   const role = primaryRole(identity);
 
-  // P3-1a: salud roles get their day cover; every other role keeps the legacy
-  // home below until P3-2 removes the infra cards. The no-session branch above
-  // stays untouched (P1).
-  if (role === 'medico' || role === 'recepcion' || role === 'caja') {
+  // P3-1a/1b: salud, obras and auditoría roles get their day cover; every
+  // other role keeps the legacy home below until P3-2 removes the infra
+  // cards. The no-session branch above stays untouched (P1).
+  if (
+    role === 'medico' ||
+    role === 'recepcion' ||
+    role === 'caja' ||
+    role === 'jefe_obra' ||
+    role === 'capataz' ||
+    role === 'gerente' ||
+    role === 'almacen' ||
+    role === 'trabajador' ||
+    role === 'auditor'
+  ) {
     const links = navItemsFor(role ?? '')
       .filter((route) => route.path !== '/')
       .map((route) => ({

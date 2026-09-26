@@ -3,8 +3,11 @@ import { PageHeader } from '@/components/page-header';
 import { RouteIcon } from '@/components/route-icon';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { IconArrowRight } from '@/components/ui/icons';
+import { AuditorDay } from './auditor-day';
 import { CajaDay } from './caja-day';
+import { JefeDay } from './jefe-day';
 import { MedicoDay } from './medico-day';
+import { ObreroDay } from './obrero-day';
 import { RecepcionDay } from './recepcion-day';
 
 /**
@@ -27,15 +30,20 @@ export interface RoleHomeProps {
 /**
  * Home shell by session role (P3-1a).
  *
- * Salud roles get their own day cover with real data; every other role falls
- * through to a neutral temporary summary with links to its enabled screens
- * until P3-1b covers obras and auditoría. Rendered from the session branch
- * of `app/page.tsx`; the no-session branch stays untouched (P1).
+ * Salud, obras and auditoría roles get their own day cover with real data;
+ * every other role falls through to a neutral temporary summary with links
+ * to its enabled screens. Rendered from the session branch of `app/page.tsx`;
+ * the no-session branch stays untouched (P1).
  */
 export function RoleHome({ role, viewerId, links }: RoleHomeProps) {
   if (role === 'medico') return <MedicoDay viewerId={viewerId} links={links} />;
   if (role === 'recepcion') return <RecepcionDay links={links} />;
   if (role === 'caja') return <CajaDay links={links} />;
+  if (role === 'jefe_obra' || role === 'capataz' || role === 'gerente' || role === 'almacen') {
+    return <JefeDay links={links} />;
+  }
+  if (role === 'trabajador') return <ObreroDay viewerId={viewerId} links={links} />;
+  if (role === 'auditor') return <AuditorDay links={links} />;
   return <NeutralDay links={links} />;
 }
 
