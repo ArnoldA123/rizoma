@@ -27,7 +27,7 @@ export default function SaludPacientesPage() {
         eyebrow="Salud · ficha 360"
         title="Pacientes"
         description="Registro con validación en vivo y lista paginada en el cliente. La ficha 360 abre consentimientos, episodios y citas, y deja la cuenta como enlace a caja."
-        badges={['W2', 'salud']}
+        badges={['salud']}
       />
 
       <RouteGuard path="/salud/pacientes">

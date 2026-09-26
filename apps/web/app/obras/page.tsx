@@ -33,7 +33,7 @@ export default function ObrasPage() {
         eyebrow="Obras"
         title="Obras"
         description="Obras del alcance, personal asignado, asistencia, operación, importaciones y tableros de obra y de empresa."
-        badges={['W4-W5', 'obras']}
+        badges={['obras']}
       />
 
       <RouteGuard path="/obras">

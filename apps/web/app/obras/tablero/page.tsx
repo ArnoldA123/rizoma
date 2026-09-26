@@ -26,7 +26,7 @@ export default function ObrasBoardPage() {
         eyebrow="Obras · tablero"
         title="Tablero de empresa"
         description="Obras y avance agregado del subárbol de la membresía, con lectura automática de 5 a 15 minutos y caché de cliente."
-        badges={['W4', 'obras']}
+        badges={['obras']}
       />
 
       <RouteGuard path="/obras/tablero">

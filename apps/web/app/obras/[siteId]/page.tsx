@@ -46,7 +46,7 @@ export default async function ObraSitePage({
         eyebrow="Obras · ficha"
         title="Ficha de obra"
         description="Cabecera, personal asignado, asistencia del día, tablero de la obra y operación: equipos, stock, avance y bitácora."
-        badges={['W4-W5', 'obras', `siteId ${siteId}`]}
+        badges={['obras', `siteId ${siteId}`]}
       />
 
       <RouteGuard path="/obras/[siteId]">

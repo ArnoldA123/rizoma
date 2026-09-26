@@ -5,6 +5,13 @@ import { API_ORIGIN } from '@/lib/server-config';
 /**
  * API reachability card.
  *
+ * P3-2: dead — no screen renders it anymore. The home page dropped the
+ * infra cards (service status, screen matrix, action matrix, contracts) so
+ * the cover shows the day instead of platform internals. Kept on purpose
+ * instead of deleted: `politicas/page.tsx` still documents the probe pattern
+ * in a comment, and deleting the file would churn that reference for no
+ * user-visible gain.
+ *
  * The visible body stays plain language (available or not, who to tell). The
  * probe facts — origin, `/health`, HTTP status, per-check states and trace id
  * — render only inside the collapsed detail. The card itself stays on screen;

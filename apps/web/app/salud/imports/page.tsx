@@ -21,7 +21,7 @@ export default function SaludImportsPage() {
         eyebrow="Salud · importaciones"
         title="Importar pacientes"
         description="Carga de un CSV de fichas con resumen del job y CSV de errores descargable."
-        badges={['W3', 'salud']}
+        badges={['salud']}
       />
 
       <RouteGuard path="/salud/imports">
