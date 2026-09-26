@@ -22,7 +22,7 @@
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "lint": "echo \"[contracts] lint — no linter configured; typecheck is the gate\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test src/contracts.test.ts src/billing.test.ts src/salud-triage-prescription.test.ts src/onboarding.test.ts src/files.test.ts src/api-keys.test.ts src/webhooks.test.ts src/notify.test.ts src/views.test.ts src/custom-fields.test.ts src/state-transitions.test.ts src/policy.test.ts src/pagination.test.ts"
+    "test": "node --test src/contracts.test.ts src/billing.test.ts src/salud-triage-prescription.test.ts src/onboarding.test.ts src/files.test.ts src/api-keys.test.ts src/webhooks.test.ts src/notify.test.ts src/views.test.ts src/custom-fields.test.ts src/state-transitions.test.ts src/policy.test.ts src/pagination.test.ts src/org-users.test.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"
