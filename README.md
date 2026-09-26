@@ -1,11 +1,16 @@
-# Rizoma — gestión para consultorios y obras
+# Rizoma
 
-Rizoma es un sistema para llevar el día a día de un **consultorio o clínica**
-y de una **obra de construcción**, cada uno con su espacio separado y seguro.
+Rizoma es un sistema de gestión (CRM) para llevar el día a día de un
+negocio: personas, agenda, cobros, personal, inventario y tableros, cada
+organización con su espacio separado y seguro.
+
+Hoy trae verticales de ejemplo para **salud** (consultorios y clínicas) y
+**construcción** (obras), y su diseño maleable permite adaptarlo a otros
+rubros.
 
 ## Qué puede hacer usted aquí
 
-### Si trabaja en salud
+### Ejemplo en salud
 
 - **Médico:** ve sus citas del día, abre la ficha de cada paciente (signos,
   episodios, recetas, consentimientos, citas y cuenta), emite recetas y deriva
@@ -15,7 +20,7 @@ y de una **obra de construcción**, cada uno con su espacio separado y seguro.
 - **Caja:** abre y cierra su turno, emite comprobantes, cobra y anula con
   motivo.
 
-### Si trabaja en obras
+### Ejemplo en obras
 
 - **Jefe o capataz:** ve su obra (personal, asistencia, equipos, stock,
   avance contra presupuesto y bitácora), registra avances y aprueba asistencia.
