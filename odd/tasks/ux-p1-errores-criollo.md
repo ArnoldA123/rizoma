@@ -18,4 +18,5 @@
 
 ## Evidencia
 - P1-1: commit 4153c1f feat(web) en feat/ux-p1-errores-criollo (3 componentes + doc P1, 148+/42-, page-guard/access 18 pass, tsc limpio, verify PASS)
-- (se registra por tarea: PR de P1 al cierre P1-5)
+- P1-2: commits 1e9e326 + 597cef8 (fix doble su rol). P1-3: be6aea2. P1-4: cdaaaaa. P1-5: 539d1ef + 2d87fea + ad8dc99.
+- PR #9 abierto de feat/ux-p1-errores-criollo a main (8 commits, 30 archivos, +645/-345). CI: 5 checks SUCCESS, MERGEABLE, pendiente merge con orden explícita.
