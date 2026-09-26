@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import {
   APPOINTMENT_DURATION_DEFAULT_MIN,
   APPOINTMENT_DURATION_MAX_MIN,
@@ -13,11 +13,14 @@ import {
 } from '@rizoma/contracts';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { FieldMessage, SavedPulse, fieldStateProps } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { FailurePanel } from '@/components/salud/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { createAppointment } from '@/lib/salud-api';
+import { createAppointment, listPatients } from '@/lib/salud-api';
+import { listOrgNodes } from '@/lib/org-api';
+import { listUsers } from '@/lib/users-api';
 import { dateTimeLocalToUtcIso } from '@/lib/salud-time';
 import { cn } from '@/lib/utils';
 
@@ -29,11 +32,9 @@ import { cn } from '@/lib/utils';
  *     schedules a wall-clock time; the value is converted once, here, into the
  *     offset-aware instant the API stores. Everything the screen *shows* is UTC,
  *     so the day filter and the agenda agree with `?date=` on the dashboards.
- *   - **Identifiers are explicit.** MVP1 has no patient search endpoint, and
- *     reception cannot read patient files at all (`patient.read` is not granted),
- *     so the form takes the patient, the professional and the sede as UUIDs. That
- *     is a real limitation of the API surface, and the field hints say so instead
- *     of pretending a picker exists.
+ *   - **Identifiers are picked, not typed.** Patient, professional and sede
+ *     come from the scope lists with a browser-side search; the id travels as
+ *     the option value and only names are visible.
  *   - **Live validation** with the contract rules, a verdict per field, and a
  *     magnetic primary CTA — the one premium motion of this screen.
  */
@@ -78,6 +79,50 @@ export function AppointmentForm({
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [created, setCreated] = useState<AppointmentRecord | null>(null);
+  const [patientItems, setPatientItems] = useState<readonly EntityItem[]>([]);
+  const [professionalItems, setProfessionalItems] = useState<readonly EntityItem[]>([]);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listPatients(controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setPatientItems(
+          rows.map((row) => ({
+            id: row.id,
+            label: row.personName,
+            sub: `${row.documentType} ${row.documentNumber}`,
+          })),
+        );
+      })
+      .catch(() => {
+        if (active) setPatientItems([]);
+      });
+    listUsers({ role: 'medico' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setProfessionalItems(
+          rows.map((row) => ({ id: row.id, label: row.name, sub: row.email })),
+        );
+      })
+      .catch(() => {
+        if (active) setProfessionalItems([]);
+      });
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     orgNodeId: checkUuidField('orgNodeId', draft.orgNodeId),
@@ -147,8 +192,7 @@ export function AppointmentForm({
         <CardTitle as="h2">Nueva cita</CardTitle>
         <CardDescription>
           La hora se escribe en hora local y se envía como instante con offset; la agenda agrupa por
-          día UTC. Paciente, profesional y sede viajan como UUID porque MVP1 no expone búsqueda de
-          pacientes ni listado de nodos.
+          día UTC. Paciente, profesional y sede se eligen de la lista del alcance con buscador.
         </CardDescription>
       </CardHeader>
 
@@ -189,58 +233,50 @@ export function AppointmentForm({
               />
             </LiveInput>
 
-            <LiveInput
-              id="appointment-patient"
-              label="Paciente (UUID)"
-              hint="Recepción no lee fichas: el identificador se recibe del mostrador."
-              issue={checks.patientId ?? null}
-              touched={show('patientId')}
-            >
-              <Input
-                id="appointment-patient"
-                className="font-mono text-xs"
-                spellCheck={false}
-                value={draft.patientId}
-                onChange={(event) => set('patientId', event.target.value)}
-                onBlur={() => touch('patientId')}
-                {...fieldStateProps(checks.patientId ?? null, show('patientId'))}
+            <div className="flex flex-col gap-1.5">
+              <EntitySelector
+                label="Paciente"
+                items={patientItems}
+                value={draft.patientId === '' ? null : draft.patientId}
+                onChange={(id) => {
+                  set('patientId', id ?? '');
+                  touch('patientId');
+                }}
+                placeholder="Seleccionar paciente…"
+                searchPlaceholder="Buscar por nombre…"
               />
-            </LiveInput>
+              <FieldMessage issue={checks.patientId ?? null} touched={show('patientId')} validLabel="Dato aceptado." />
+            </div>
 
-            <LiveInput
-              id="appointment-professional"
-              label="Profesional (UUID)"
-              issue={checks.professionalId ?? null}
-              touched={show('professionalId')}
-            >
-              <Input
-                id="appointment-professional"
-                className="font-mono text-xs"
-                spellCheck={false}
-                value={draft.professionalId}
-                onChange={(event) => set('professionalId', event.target.value)}
-                onBlur={() => touch('professionalId')}
-                {...fieldStateProps(checks.professionalId ?? null, show('professionalId'))}
+            <div className="flex flex-col gap-1.5">
+              <EntitySelector
+                label="Profesional"
+                items={professionalItems}
+                value={draft.professionalId === '' ? null : draft.professionalId}
+                onChange={(id) => {
+                  set('professionalId', id ?? '');
+                  touch('professionalId');
+                }}
+                placeholder="Seleccionar profesional…"
+                searchPlaceholder="Buscar por nombre…"
               />
-            </LiveInput>
+              <FieldMessage issue={checks.professionalId ?? null} touched={show('professionalId')} validLabel="Dato aceptado." />
+            </div>
 
-            <LiveInput
-              id="appointment-org-node"
-              label="Sede (UUID)"
-              className="sm:col-span-2"
-              issue={checks.orgNodeId ?? null}
-              touched={show('orgNodeId')}
-            >
-              <Input
-                id="appointment-org-node"
-                className="font-mono text-xs"
-                spellCheck={false}
-                value={draft.orgNodeId}
-                onChange={(event) => set('orgNodeId', event.target.value)}
-                onBlur={() => touch('orgNodeId')}
-                {...fieldStateProps(checks.orgNodeId ?? null, show('orgNodeId'))}
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <EntitySelector
+                label="Sede"
+                items={sedeItems}
+                value={draft.orgNodeId === '' ? null : draft.orgNodeId}
+                onChange={(id) => {
+                  set('orgNodeId', id ?? '');
+                  touch('orgNodeId');
+                }}
+                placeholder="Seleccionar sede…"
+                searchPlaceholder="Buscar por nombre…"
               />
-            </LiveInput>
+              <FieldMessage issue={checks.orgNodeId ?? null} touched={show('orgNodeId')} validLabel="Dato aceptado." />
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

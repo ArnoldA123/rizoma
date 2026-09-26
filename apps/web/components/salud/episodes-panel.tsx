@@ -11,6 +11,7 @@ import {
 } from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
@@ -19,6 +20,7 @@ import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { EPISODE_STATUS_LABELS } from '@/lib/labels';
 import { closeEpisode, createEpisode } from '@/lib/salud-api';
+import { listUsers } from '@/lib/users-api';
 import { episodesOfPatient } from '@/lib/salud-select';
 import { formatUtcDate, utcDateOf } from '@/lib/salud-time';
 import type { Resource } from '@/lib/use-resource';
@@ -225,6 +227,26 @@ function EpisodeForm({ patientId, onOpened }: EpisodeFormProps) {
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
+  const [professionalItems, setProfessionalItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listUsers({ role: 'medico' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setProfessionalItems(
+          rows.map((row) => ({ id: row.id, label: row.name, sub: row.email })),
+        );
+      })
+      .catch(() => {
+        if (active) setProfessionalItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     specialty: checkRequiredText('specialty', specialty, SPECIALTY_MAX),
@@ -282,18 +304,16 @@ function EpisodeForm({ patientId, onOpened }: EpisodeFormProps) {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label htmlFor="episode-professional" className="text-[0.8125rem] font-medium">
-            Profesional (UUID)
-          </label>
-          <Input
-            id="episode-professional"
-            className="font-mono text-xs"
-            spellCheck={false}
-            placeholder="vacío = usted mismo"
-            value={professionalId}
-            onChange={(event) => setProfessionalId(event.target.value)}
-            onBlur={() => setTouched(true)}
-            {...fieldStateProps(checks.professionalId ?? null, touched)}
+          <EntitySelector
+            label="Profesional"
+            items={professionalItems}
+            value={professionalId === '' ? null : professionalId}
+            onChange={(id) => {
+              setProfessionalId(id ?? '');
+              setTouched(true);
+            }}
+            placeholder="Vacío: usted mismo"
+            searchPlaceholder="Buscar por nombre…"
           />
           <FieldMessage
             issue={checks.professionalId ?? null}

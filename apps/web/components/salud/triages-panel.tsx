@@ -340,33 +340,23 @@ function TriageForm({ patientId, episodes, onCreated }: TriageFormProps) {
           <label htmlFor="triage-episode" className="text-[0.8125rem] font-medium">
             Episodio (opcional)
           </label>
-          {episodes.length === 0 ? (
-            <Input
-              id="triage-episode"
-              className="font-mono text-xs"
-              spellCheck={false}
-              placeholder="UUID del episodio o vacío"
-              value={episodeId}
-              onChange={(event) => setEpisodeId(event.target.value)}
-              onBlur={() => setTouched(true)}
-              {...fieldStateProps(checks.episodeId ?? null, touched)}
-            />
-          ) : (
-            <Select
-              id="triage-episode"
-              value={episodeId}
-              onChange={(event) => setEpisodeId(event.target.value)}
-              onBlur={() => setTouched(true)}
-            >
-              <option value="">Sin episodio</option>
-              {episodes.map((episode) => (
+          <Select
+            id="triage-episode"
+            value={episodeId}
+            onChange={(event) => setEpisodeId(event.target.value)}
+            onBlur={() => setTouched(true)}
+          >
+            <option value="">Sin episodio</option>
+            {episodes.map((episode) => {
+              const date = (episode.openedAt ?? '').slice(0, 10);
+              return (
                 <option key={episode.id} value={episode.id}>
-                  {episode.specialty} · {episode.id.slice(0, 8)}… ·{' '}
+                  {episode.specialty}{date === '' ? '' : ` · ${date}`} ·{' '}
                   {episode.status === 'open' ? 'abierto' : 'cerrado'}
                 </option>
-              ))}
-            </Select>
-          )}
+              );
+            })}
+          </Select>
           <FieldMessage issue={checks.episodeId ?? null} touched={touched} validLabel="Dato aceptado." />
         </div>
 
