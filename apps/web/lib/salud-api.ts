@@ -28,6 +28,7 @@ import {
   appointmentListSchema,
   appointmentRecordSchema,
   cashSessionCloseInputSchema,
+  cashSessionListSchema,
   cashSessionOpenInputSchema,
   cashSessionRecordSchema,
   consentCreateInputSchema,
@@ -61,6 +62,7 @@ import {
   type AppointmentCreateInput,
   type AppointmentRecord,
   type CashSessionCloseInput,
+  type CashSessionListQuery,
   type CashSessionOpenInput,
   type CashSessionRecord,
   type ConsentCreateInput,
@@ -282,6 +284,39 @@ export function openCashSession(input: CashSessionOpenInput): Promise<CashSessio
 export function closeCashSession(input: CashSessionCloseInput): Promise<CashSessionRecord> {
   const body = cashSessionCloseInputSchema.parse(input);
   return postJson(`${BILLING}/cash-sessions/close`, body, cashSessionRecordSchema);
+}
+
+/** Filters of `GET /v1/billing/cash-sessions` — the query fields the screen may set. */
+export interface ListCashSessionsQuery extends CashSessionListQuery {}
+
+/**
+ * `GET /v1/billing/cash-sessions` — shifts inside the caller scope, newest
+ * first, capped at 200 rows. Every filter is optional; an unset filter is
+ * omitted from the query.
+ *
+ * Label rule (the screen owns the text, the id owns the value): the option
+ * shows the opening date/time plus the sede and the status — never the
+ * session id.
+ */
+export function listCashSessions(
+  query: ListCashSessionsQuery = {},
+  signal?: AbortSignal,
+): Promise<CashSessionRecord[]> {
+  const params = new URLSearchParams();
+  if (query.status !== undefined && query.status !== null) {
+    params.set('status', query.status);
+  }
+  if (query.orgNodeId !== undefined && query.orgNodeId !== null && query.orgNodeId !== '') {
+    params.set('orgNodeId', query.orgNodeId);
+  }
+  if (query.from !== undefined && query.from !== null && query.from !== '') {
+    params.set('from', query.from);
+  }
+  if (query.to !== undefined && query.to !== null && query.to !== '') {
+    params.set('to', query.to);
+  }
+  const suffix = params.size === 0 ? '' : `?${params.toString()}`;
+  return readList(`${BILLING}/cash-sessions${suffix}`, cashSessionListSchema, signal);
 }
 
 // ============ billing: quotes ============

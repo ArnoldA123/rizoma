@@ -39,6 +39,7 @@ import {
   attendanceQueryString,
   attendanceRecordSchema,
   budgetLineCreateInputSchema,
+  budgetLineListSchema,
   budgetLineRecordSchema,
   companyBoardSchema,
   importJobRecordSchema,
@@ -76,7 +77,9 @@ import {
   type AttendanceQuery,
   type AttendanceRecord,
   type BudgetLineCreateInput,
+  type BudgetLineListQuery,
   type BudgetLineRecord,
+  type BudgetLineWithItem,
   type CompanyBoard,
   type ImportJobRecord,
   type InventoryItemRecord,
@@ -381,6 +384,28 @@ export function reverseStockMove(moveId: string): Promise<StockMoveRecord> {
 export function createBudgetLine(input: BudgetLineCreateInput): Promise<BudgetLineRecord> {
   const body = budgetLineCreateInputSchema.parse(input);
   return postJson(`${BASE}/progress/budget-lines`, body, budgetLineRecordSchema);
+}
+
+/**
+ * `GET /v1/obras/progress/budget-lines?site=` — budget lines of one site
+ * (`site.read`), alphabetical by description, capped at 200 rows.
+ *
+ * The site rides in the path query (`?site=`); only the activation flag is a
+ * filter and it is omitted when unset. Label rule (the screen owns the text,
+ * the id owns the value): the option shows the description plus the catalogue
+ * item name — never the line id.
+ */
+export function listBudgetLines(
+  siteId: string,
+  query: BudgetLineListQuery = {},
+  signal?: AbortSignal,
+): Promise<BudgetLineWithItem[]> {
+  const params = new URLSearchParams();
+  params.set('site', siteId);
+  if (query.active !== undefined && query.active !== null) {
+    params.set('active', query.active ? 'true' : 'false');
+  }
+  return readList(`${BASE}/progress/budget-lines?${params.toString()}`, budgetLineListSchema, signal);
 }
 
 /**
