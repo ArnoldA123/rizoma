@@ -150,6 +150,41 @@ export type BudgetLinePageQuery = z.infer<typeof budgetLinePageQuerySchema>;
 export const budgetLinePagedSchema = pagedListSchema(budgetLineWithItemSchema);
 export type BudgetLinePaged = z.infer<typeof budgetLinePagedSchema>;
 
+/** One crew (`crews`), as `GET /v1/obras/crews` answers it. */
+export const crewRecordSchema = z.object({
+  id: uuidSchema,
+  name: z.string(),
+  orgNodeId: uuidSchema,
+  active: z.boolean(),
+});
+
+export type CrewRecord = z.infer<typeof crewRecordSchema>;
+
+/**
+ * `GET /v1/obras/crews` — bare array capped at 200 (legacy path, no cursor),
+ * alphabetical by name.
+ */
+export const crewListSchema = z.array(crewRecordSchema);
+export type CrewList = z.infer<typeof crewListSchema>;
+
+/**
+ * Query filters of `GET /v1/obras/crews`, field-for-field what the service
+ * parser (`parseCrewListFilters` in `crews.service.ts`) accepts.
+ */
+export const crewListQuerySchema = z.object({
+  orgNodeId: uuidSchema.nullable().optional(),
+  active: z.boolean().nullable().optional(),
+});
+export type CrewListQuery = z.infer<typeof crewListQuerySchema>;
+
+/** Keyset query (`?cursor=` / `?limit=`) shared with every R1 listing. */
+export const crewPageQuerySchema = paginationQuerySchema;
+export type CrewPageQuery = z.infer<typeof crewPageQuerySchema>;
+
+/** Keyset page of `GET /v1/obras/crews` (`{rows, nextCursor}`). */
+export const crewPagedSchema = pagedListSchema(crewRecordSchema);
+export type CrewPaged = z.infer<typeof crewPagedSchema>;
+
 /** One executed quantity (`progress_entries`), posted on creation. */
 export const progressEntryRecordSchema = z.object({
   id: uuidSchema,

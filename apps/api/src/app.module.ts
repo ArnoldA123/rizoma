@@ -126,10 +126,12 @@ import { PatientsController } from './salud/patients.controller.ts';
 import { PrescriptionsController } from './salud/prescriptions.controller.ts';
 import { TriagesController } from './salud/triages.controller.ts';
 import { AttendanceController } from './obras/attendance.controller.ts';
+import { ImportJobsController } from './imports/imports.controller.ts';
 import { OrgController } from './org/org.controller.ts';
 import { UsersController } from './users/users.controller.ts';
 import { ViewsController } from './views/views.controller.ts';
 import { AssetsController } from './obras/assets.controller.ts';
+import { CrewsController } from './obras/crews.controller.ts';
 import { ObrasDashboardsController } from './obras/dashboards.controller.ts';
 import { ObrasImportsController } from './obras/import.controller.ts';
 import { ProgressController } from './obras/progress.controller.ts';
@@ -168,10 +170,12 @@ import {
     SitesController,
     StaffController,
     AttendanceController,
+    ImportJobsController,
     OrgController,
     UsersController,
     ViewsController,
     AssetsController,
+    CrewsController,
     StockController,
     ProgressController,
     SiteLogsController,
