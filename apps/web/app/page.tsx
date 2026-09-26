@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { ApiStatusCard } from '@/components/api-status-card';
+import { RoleHome } from '@/components/home/role-home';
 import { PageHeader } from '@/components/page-header';
 import { RouteIcon } from '@/components/route-icon';
 import { SessionRequiredNotice } from '@/components/session-required-notice';
@@ -18,8 +19,10 @@ import { primaryRole } from '@/lib/tenant';
  * It does three jobs and no more: it confirms the session is active, it shows
  * whether the service answers, and it shows exactly which sections and actions
  * the role holds. Machine facts (ids, claims, codes, file paths) live only
- * inside a collapsed detail, never in the visible body. The per-role layout
- * is P3's work; this screen keeps its current structure on purpose.
+ * inside a collapsed detail, never in the visible body. The per-role day covers
+ * for salud (médico, recepción, caja) live in `components/home/role-home` (P3-1a)
+ * and this screen delegates to them; every other role keeps the current
+ * structure below on purpose until P3-2 removes the infra cards.
  */
 export const dynamic = 'force-dynamic';
 
@@ -41,6 +44,25 @@ export default async function HomePage() {
 
   const identity = session.identity.identity;
   const role = primaryRole(identity);
+
+  // P3-1a: salud roles get their day cover; every other role keeps the legacy
+  // home below until P3-2 removes the infra cards. The no-session branch above
+  // stays untouched (P1).
+  if (role === 'medico' || role === 'recepcion' || role === 'caja') {
+    const links = navItemsFor(role ?? '')
+      .filter((route) => route.path !== '/')
+      .map((route) => ({
+        path: route.path,
+        label: route.label,
+        description: route.description,
+      }));
+    return (
+      <div className="flex flex-col gap-8">
+        <RoleHome role={role} viewerId={identity.userId} links={links} />
+      </div>
+    );
+  }
+
   const reachable = navItemsFor(role ?? '').filter((route) => route.path !== '/');
   const grantedActions = ACTION_CODES.filter((action) => rolePermitsAction(role ?? '', action));
 
