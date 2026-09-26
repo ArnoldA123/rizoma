@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { FailurePanel } from '@/components/ui/states';
+import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { formatQuantity } from '@/lib/format';
 import { getCompanyBoard } from '@/lib/obras-api';
 import {
@@ -46,7 +47,7 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
   const [pollMs, setPollMs] = useState(OBRAS_BOARD_POLL_DEFAULT_MS);
   const [compare, setCompare] = useState<ObrasBoardCompareMode>('off');
   const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<ApiFailure | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   // The endpoint takes no parameter, so the resource key is a constant: the
@@ -116,7 +117,7 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
       const file = await downloadCompanyBoardCsv();
       saveTextFile(file.filename, file.csv);
     } catch (error) {
-      setDownloadError(error instanceof Error ? error.message : 'No se pudo descargar el CSV.');
+      setDownloadError(classifyApiError(error));
     } finally {
       setDownloading(false);
     }
@@ -193,14 +194,18 @@ export function CompanyBoardPanel({ className }: { readonly className?: string }
         </div>
 
         {compared.failure !== null && compare !== 'off' ? (
-          <p role="alert" className="text-xs text-destructive">
-            No se pudo leer la comparativa: {compared.failure.message}
-          </p>
+          <FailurePanel
+            title="No se pudo leer la comparativa"
+            failure={compared.failure}
+            onRetry={compared.reload}
+          />
         ) : null}
         {downloadError !== null ? (
-          <p role="alert" className="text-xs text-destructive">
-            No se pudo descargar el CSV: {downloadError}
-          </p>
+          <FailurePanel
+            title="No se pudo descargar el CSV"
+            failure={downloadError}
+            onRetry={() => void downloadCsv()}
+          />
         ) : null}
 
         {board.failure !== null ? (

@@ -8,7 +8,7 @@
 - [x] P1-0 Mapeo (scout solo lectura): inventario exacto de pantallas con code/reason/traceId/envelope/403/UUID visibles + paneles con EnvelopeFields + flujo sin-sesión con rebote
 - [x] P1-1 `denied-notice.tsx` + `session-required-notice.tsx`: denegación cálida y breve con motivo + qué hacer + rol destino + "Copiar detalle" oculto. Verde: page-guard/access 18 pass, tsc limpio. Veredicto verify PASS.
 - [x] P1-2 `ui/states.tsx` + `salud/states.tsx` + `salud-errors.ts`: estados genéricos sin jerga, sin inglés snake_case. Verde: web 137 pass, tsc limpio. Verify PASS + fix doble "su rol" verificado (18 pass, tsc limpio).
-- [ ] P1-3 Paneles salud/obras/tableros: quitar EnvelopeFields visibles, mover a "Copiar detalle"
+- [x] P1-3 Paneles salud/obras/tableros: quitar EnvelopeFields visibles, mover a "Copiar detalle". Verde: web 137 pass, tsc limpio. Verify PASS (cero failure.message directo, cero imports EnvelopeFields).
 - [ ] P1-4 Sin sesión: mensaje único "Entre aquí" → `/login`, sin rebote login↔inicio
 - [ ] P1-5 Cierre: suites en verde + clics por rol + aceptación (ninguna pantalla muestra UUID/código salvo tras "Copiar detalle")
 
