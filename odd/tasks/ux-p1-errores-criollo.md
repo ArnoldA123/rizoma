@@ -10,7 +10,7 @@
 - [x] P1-2 `ui/states.tsx` + `salud/states.tsx` + `salud-errors.ts`: estados genéricos sin jerga, sin inglés snake_case. Verde: web 137 pass, tsc limpio. Verify PASS + fix doble "su rol" verificado (18 pass, tsc limpio).
 - [x] P1-3 Paneles salud/obras/tableros: quitar EnvelopeFields visibles, mover a "Copiar detalle". Verde: web 137 pass, tsc limpio. Verify PASS (cero failure.message directo, cero imports EnvelopeFields).
 - [x] P1-4 Sin sesión: mensaje único "Entre aquí" → `/login`, sin rebote login↔inicio. Verde: web 137 pass, tsc limpio. Verify PASS (protección intacta, residual con sesión va a P1-5).
-- [ ] P1-5 Cierre: suites en verde + clics por rol + aceptación (ninguna pantalla muestra UUID/código salvo tras "Copiar detalle")
+- [x] P1-5 Cierre: suites en verde + clics por rol + aceptación (ninguna pantalla muestra UUID/código salvo tras "Copiar detalle"). Verde: web 137 pass, tsc limpio. Verify PASS en 10 archivos + 3 bloques finales; UUIDs de formularios van a P2; smoke navegador pendiente de stack local.
 
 ## Fuera
 - P2-P7 (otras hijas)
