@@ -320,14 +320,16 @@ export function AssetsPanel({
                       {assetStatusLabel(row.status)}
                     </Badge>
                     <span className="tabular text-[0.8125rem] font-medium">{row.code}</span>
-                    <span className="text-xs text-muted-foreground">{row.kind}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {row.kind} · serie {row.serial}
+                    </span>
                     {row.currentSiteId === siteId ? (
                       <Badge variant="outline">esta obra</Badge>
                     ) : null}
                   </div>
                   <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                    unidad {row.id} · serie {row.serial}
-                    {row.currentSiteId === null ? '' : ` · obra ${row.currentSiteId}`}
+                    unidad {row.id.slice(0, 8)}…
+                    {row.currentSiteId === null ? '' : ` · obra ${row.currentSiteId.slice(0, 8)}…`}
                   </span>
                 </div>
                 <Button

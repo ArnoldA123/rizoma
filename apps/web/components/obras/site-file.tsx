@@ -279,10 +279,18 @@ function SiteHeader({
           <dt className="text-muted-foreground">fin</dt>
           <dd>{site.endedAt === null ? '—' : formatUtcDate(site.endedAt.slice(0, 10))}</dd>
           <dt className="text-muted-foreground">nodo</dt>
-          <dd className="font-mono break-all">{site.orgNodeId}</dd>
-          <dt className="text-muted-foreground">siteId</dt>
-          <dd className="font-mono break-all">{site.id}</dd>
+          <dd className="font-mono text-muted-foreground break-all">{site.orgNodeId.slice(0, 8)}…</dd>
+          <dt className="text-muted-foreground">obra</dt>
+          <dd className="font-mono text-muted-foreground break-all">{site.id.slice(0, 8)}…</dd>
         </dl>
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+            Copiar detalle
+          </summary>
+          <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+            {`siteId: ${site.id}\norgNodeId: ${site.orgNodeId}`}
+          </pre>
+        </details>
       </CardContent>
     </Card>
   );

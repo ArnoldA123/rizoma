@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { AttendanceRecord } from '@rizoma/contracts';
 import { attendanceListSchema, attendanceQueryString } from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
@@ -15,7 +15,7 @@ import { requestJson } from '@/lib/api-client';
 import { withSavedView } from '@/lib/views-api';
 import { formatUtcStamp } from '@/lib/format';
 import { attendanceStatusLabel, attendanceStatusVariant } from '@/lib/labels';
-import { approveAttendance, markAttendance } from '@/lib/obras-api';
+import { approveAttendance, listSiteStaff, markAttendance } from '@/lib/obras-api';
 import { currentUtcDate, formatUtcDateLong, isCurrentUtcDate, shiftUtcDate } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 
@@ -80,6 +80,27 @@ export function AttendancePanel({
 
   const rows = attendance.data ?? [];
   const registered = rows.filter((row) => row.status === 'registered').length;
+  // Worker names resolve in the browser against the site staff list: the
+  // day endpoint carries only user ids. A failed read leaves the map empty
+  // and the row falls back to the short id — the list never blocks on it.
+  const [staffNames, setStaffNames] = useState<ReadonlyMap<string, string>>(new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listSiteStaff(siteId, controller.signal)
+      .then((staff) => {
+        if (!active) return;
+        setStaffNames(new Map(staff.map((row) => [row.userId, row.userName])));
+      })
+      .catch(() => {
+        if (active) setStaffNames(new Map());
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [siteId]);
 
   async function handleMark(): Promise<void> {
     setFailure(null);
@@ -216,7 +237,9 @@ export function AttendancePanel({
               >
                 <div className="flex min-w-0 flex-col gap-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="tabular font-mono text-xs">{row.userId}</span>
+                    <span className="text-[0.8125rem] font-medium">
+                      {staffNames.get(row.userId) ?? `Trabajador ${row.userId.slice(0, 8)}…`}
+                    </span>
                     <Badge variant={attendanceStatusVariant(row.status)}>
                       {attendanceStatusLabel(row.status)}
                     </Badge>
@@ -224,6 +247,9 @@ export function AttendancePanel({
                   <span className="tabular text-xs text-muted-foreground">
                     ingreso {formatUtcStamp(row.checkIn)} · salida{' '}
                     {row.checkOut === null ? '—' : formatUtcStamp(row.checkOut)} · origen {row.source}
+                  </span>
+                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                    marca {row.id.slice(0, 8)}… · usuario {row.userId.slice(0, 8)}…
                   </span>
                 </div>
                 {canApprove && row.status === 'registered' ? (

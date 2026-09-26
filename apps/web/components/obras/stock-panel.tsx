@@ -137,6 +137,12 @@ export function StockPanel({
       controller.abort();
     };
   }, []);
+  // Item names resolve against the catalogue already loaded: the moves
+  // endpoint carries only item ids. A missing row falls back to the short id.
+  const itemNames = useMemo(
+    () => new Map(catalogueRows.map((row) => [row.id, `${row.name} · ${row.sku}`])),
+    [catalogueRows],
+  );
   /** Moves of the picked item first, so the board shortcut reads as a filter. */
   const orderedMoves = useMemo(() => {
     if (itemId === '') return ledgerRows;
@@ -482,15 +488,15 @@ export function StockPanel({
                 >
                   <div className="flex min-w-0 flex-col gap-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="tabular text-[0.8125rem] font-medium">{row.sku}</span>
-                      <span className="text-xs text-muted-foreground">{row.name}</span>
+                      <span className="tabular text-[0.8125rem] font-medium">{row.name}</span>
+                      <span className="tabular font-mono text-xs text-muted-foreground">{row.sku}</span>
                       {itemId === row.id ? <Badge variant="outline">elegido</Badge> : null}
                     </div>
                     <span className="tabular text-xs text-muted-foreground">
                       mínimo {formatQuantity(row.minStock)} {row.unit}
                     </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                      ítem {row.id}
+                      ítem {row.id.slice(0, 8)}…
                     </span>
                   </div>
                   <Button
@@ -562,9 +568,12 @@ export function StockPanel({
                       </span>
                       {row.siteId === siteId ? <Badge variant="outline">esta obra</Badge> : null}
                     </div>
+                    <span className="text-xs text-muted-foreground">
+                      {itemNames.get(row.itemId) ?? `Ítem ${row.itemId.slice(0, 8)}…`}
+                    </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                      movimiento {row.id} · ítem {row.itemId}
-                      {row.siteId === null ? '' : ` · obra ${row.siteId}`} · {formatUtcStamp(row.at)}
+                      movimiento {row.id.slice(0, 8)}… · ítem {row.itemId.slice(0, 8)}…
+                      {row.siteId === null ? '' : ` · obra ${row.siteId.slice(0, 8)}…`} · {formatUtcStamp(row.at)}
                     </span>
                   </div>
                   {canConsume && stockMoveCanBeReversed(row) ? (

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
   SITE_LOG_TEXT_MAX,
   checkOptionalUuidField,
@@ -19,7 +19,7 @@ import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { formatUtcStamp } from '@/lib/format';
 import { siteLogStatusLabel, siteLogStatusVariant } from '@/lib/labels';
-import { createSiteLog, listSiteLogs, publishSiteLog } from '@/lib/obras-api';
+import { createSiteLog, listSiteLogs, listSiteStaff, publishSiteLog } from '@/lib/obras-api';
 import { useResource } from '@/lib/use-resource';
 
 /**
@@ -66,6 +66,27 @@ export function LogsPanel({ siteId, canMark, className }: LogsPanelProps) {
     listSiteLogs(siteId, signal),
   );
   const rows = logs.data ?? [];
+  // Author names resolve in the browser against the site staff list: the log
+  // endpoint carries only the author id. A failed read leaves the map empty
+  // and the row falls back to the short id.
+  const [authorNames, setAuthorNames] = useState<ReadonlyMap<string, string>>(new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listSiteStaff(siteId, controller.signal)
+      .then((staff) => {
+        if (!active) return;
+        setAuthorNames(new Map(staff.map((row) => [row.userId, row.userName])));
+      })
+      .catch(() => {
+        if (active) setAuthorNames(new Map());
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [siteId]);
 
   const checks: Readonly<Record<string, FieldCheck>> = useMemo(
     () => ({
@@ -190,8 +211,12 @@ export function LogsPanel({ siteId, canMark, className }: LogsPanelProps) {
                     )}
                   </div>
                   <p className="text-[0.9375rem] whitespace-pre-wrap">{row.text}</p>
+                  <span className="text-xs text-muted-foreground">
+                    {authorNames.get(row.authorId) ?? `Autor ${row.authorId.slice(0, 8)}…`} ·{' '}
+                    {formatUtcStamp(row.at)}
+                  </span>
                   <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                    entrada {row.id} · autor {row.authorId}
+                    entrada {row.id.slice(0, 8)}… · autor {row.authorId.slice(0, 8)}…
                   </span>
                 </div>
                 {canMark && siteLogIsDraft(row) ? (

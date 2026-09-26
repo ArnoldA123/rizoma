@@ -158,6 +158,13 @@ export function ProgressPanel({
     }),
     [entry],
   );
+  // Budget line descriptions resolve against the list already loaded: the
+  // entries endpoint carries only the line id. Missing rows fall back to the
+  // short id.
+  const lineNames = useMemo(
+    () => new Map(lineOptions.map((item) => [item.id, item.label])),
+    [lineOptions],
+  );
   const milestoneChecks: Readonly<Record<string, FieldCheck>> = useMemo(
     () => ({
       name: checkRequiredText('name', milestoneName, MILESTONE_NAME_MAX),
@@ -229,7 +236,7 @@ export function ProgressPanel({
       setTouched({});
       setSubmitted(false);
       setSuccess(
-        `Partida de ${formatQuantity(created.qtyDone)} registrada como «${created.status}» (${formatUtcStamp(created.at)}). El autor se toma del token, no del formulario: reported_by es ${created.reportedBy}.`,
+        `Partida de ${formatQuantity(created.qtyDone)} registrada como «${created.status}» (${formatUtcStamp(created.at)}). El autor se toma del token, no del formulario.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -408,10 +415,15 @@ export function ProgressPanel({
                       </span>
                       <Badge variant="outline">{row.status}</Badge>
                     </div>
+                    <span className="text-xs text-muted-foreground">
+                      {row.budgetLineId === null
+                        ? 'Sin línea de presupuesto'
+                        : (lineNames.get(row.budgetLineId) ?? `Línea ${row.budgetLineId.slice(0, 8)}…`)}
+                    </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                      partida {row.id}
-                      {row.budgetLineId === null ? ' · sin línea' : ` · línea ${row.budgetLineId}`} ·
-                      autor {row.reportedBy}
+                      partida {row.id.slice(0, 8)}…
+                      {row.budgetLineId === null ? ' · sin línea' : ` · línea ${row.budgetLineId.slice(0, 8)}…`} ·
+                      autor {row.reportedBy.slice(0, 8)}…
                     </span>
                   </div>
                   <span className="tabular text-xs text-muted-foreground">

@@ -198,8 +198,8 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
                       <Badge variant="neutral">{row.crewName}</Badge>
                     )}
                   </div>
-                  <span className="tabular font-mono text-xs text-muted-foreground">
-                    userId {row.userId}
+                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                    usuario {row.userId.slice(0, 8)}…
                     {row.validFrom === null ? '' : ` · desde ${formatUtcDate(row.validFrom.slice(0, 10))}`}
                   </span>
                 </div>
