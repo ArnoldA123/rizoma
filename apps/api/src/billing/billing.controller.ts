@@ -14,6 +14,7 @@ import {
   getInvoiceWithFiscal,
   IDEMPOTENCY_KEY_HEADER,
   issueInvoice,
+  listCashSessions,
   listInvoices,
   listQuotes,
   openCashSession,
@@ -29,6 +30,9 @@ import {
 /** Paged envelope returned only when the caller sends `?cursor=` or `?limit=`. */
 export type InvoicePage = BillingPage<InvoiceRecord>;
 
+/** Paged envelope of the cash-session listing (same opt-in shape). */
+export type CashSessionPage = BillingPage<CashSessionRecord>;
+
 @Controller('billing')
 export class BillingController {
   /** `POST /v1/billing/cash-sessions/open` — opens the cashier shift. */
@@ -41,6 +45,32 @@ export class BillingController {
   @Post('cash-sessions/close')
   closeCash(@Req() req: TenantScopedRequest, @Body() body: unknown): Promise<CashSessionRecord> {
     return closeCashSession(actorFromRequest(req), body);
+  }
+
+  /**
+   * `GET /v1/billing/cash-sessions` — shifts inside the caller scope, capped at 200.
+   * Without `?cursor=`/`?limit=` answers the legacy bare array; with either,
+   * answers the keyset page `{rows, nextCursor}` ordered by
+   * `opened_at DESC, id DESC`. Every row carries `openedByName` via `JOIN users`.
+   */
+  @Get('cash-sessions')
+  cashSessions(
+    @Req() req: TenantScopedRequest,
+    @Query('status') status?: string,
+    @Query('orgNodeId') orgNodeId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ): Promise<CashSessionRecord[] | CashSessionPage> {
+    return listCashSessions(actorFromRequest(req), {
+      status,
+      orgNodeId,
+      from,
+      to,
+      cursor,
+      limit,
+    });
   }
 
   /** `GET /v1/billing/quotes` — quotes inside the caller scope. */

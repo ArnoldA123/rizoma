@@ -18,6 +18,7 @@
 // produces exactly the row the service would.
 import { z } from 'zod';
 import { isoValueSchema, uuidSchema } from './common.ts';
+import { pagedListSchema, paginationQuerySchema } from './pagination.ts';
 
 // ============ records ============
 
@@ -110,6 +111,44 @@ export const budgetLineRecordSchema = z.object({
 });
 
 export type BudgetLineRecord = z.infer<typeof budgetLineRecordSchema>;
+
+/**
+ * `GET .../budget-lines` — one budget line with the catalogue item names
+ * resolved (`JOIN inventory_items`); `itemSku`/`itemName` are `null` when the
+ * line has no item, so the screen renders the description, never a UUID.
+ */
+export const budgetLineWithItemSchema = budgetLineRecordSchema.extend({
+  itemSku: z.string().nullable(),
+  itemName: z.string().nullable(),
+});
+
+export type BudgetLineWithItem = z.infer<typeof budgetLineWithItemSchema>;
+
+/**
+ * `GET .../budget-lines` — bare array capped at 200 (legacy path, no cursor),
+ * alphabetical by description.
+ */
+export const budgetLineListSchema = z.array(budgetLineWithItemSchema);
+export type BudgetLineList = z.infer<typeof budgetLineListSchema>;
+
+/**
+ * Query filters of `GET .../budget-lines`, field-for-field what the service
+ * parser (`parseBudgetLineListFilters` in `resources.service.ts`) accepts.
+ * The site rides in the path (or `?site=` on the flat route); only the
+ * activation flag is a query filter.
+ */
+export const budgetLineListQuerySchema = z.object({
+  active: z.boolean().nullable().optional(),
+});
+export type BudgetLineListQuery = z.infer<typeof budgetLineListQuerySchema>;
+
+/** Keyset query (`?cursor=` / `?limit=`) shared with every R1 listing. */
+export const budgetLinePageQuerySchema = paginationQuerySchema;
+export type BudgetLinePageQuery = z.infer<typeof budgetLinePageQuerySchema>;
+
+/** Keyset page of `GET .../budget-lines` (`{rows, nextCursor}`). */
+export const budgetLinePagedSchema = pagedListSchema(budgetLineWithItemSchema);
+export type BudgetLinePaged = z.infer<typeof budgetLinePagedSchema>;
 
 /** One executed quantity (`progress_entries`), posted on creation. */
 export const progressEntryRecordSchema = z.object({

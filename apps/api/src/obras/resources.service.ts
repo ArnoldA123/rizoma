@@ -536,6 +536,12 @@ export interface BudgetLineRecord {
   active: boolean;
 }
 
+/** One budget line with the catalogue item names resolved via `JOIN inventory_items` (null when the line has no item). */
+export interface BudgetLineWithItem extends BudgetLineRecord {
+  itemSku: string | null;
+  itemName: string | null;
+}
+
 export interface ProgressEntryRecord {
   id: string;
   tenantId: string;
@@ -639,6 +645,14 @@ function mapBudgetLine(row: Record<string, unknown>): BudgetLineRecord {
     qtyPlanned: readNumber(row.qty_planned),
     unitCost: readNumber(row.unit_cost),
     active: readBoolean(row.active),
+  };
+}
+
+function mapBudgetLineWithItem(row: Record<string, unknown>): BudgetLineWithItem {
+  return {
+    ...mapBudgetLine(row),
+    itemSku: readString(row.item_sku) ?? null,
+    itemName: readString(row.item_name) ?? null,
   };
 }
 
@@ -1581,6 +1595,138 @@ export async function createBudgetLine(
     diff: { siteId: line.siteId, description: line.description, qtyPlanned: line.qtyPlanned },
   });
   return line;
+}
+
+/** Filters of `GET .../budget-lines`: the activation flag only; the site rides in the path. */
+export interface BudgetLineListFilters {
+  readonly active: boolean | null;
+}
+
+/**
+ * Parses `?active=`: absent/empty counts as absent; anything but an
+ * unambiguous boolean is a 400, never a silently ignored filter.
+ */
+export function parseBudgetLineListFilters(query: unknown, traceId: string): BudgetLineListFilters {
+  const record = asRecord(query);
+  const raw = record.active;
+  if (raw === undefined || raw === null) return { active: null };
+  if (typeof raw === 'boolean') return { active: raw };
+  if (typeof raw !== 'string' || raw.trim() === '') return { active: null };
+  const lowered = raw.trim().toLowerCase();
+  if (lowered === 'true' || lowered === '1' || lowered === 't') return { active: true };
+  if (lowered === 'false' || lowered === '0' || lowered === 'f') return { active: false };
+  throw badRequest(`Invalid active: ${raw}`, traceId);
+}
+
+/** `?cursor=` + `?limit=` input for the keyset budget-line listing. */
+export interface BudgetLinePageInput {
+  readonly active?: boolean | string | null;
+  readonly cursor?: string | null;
+  readonly limit?: number | string | null;
+}
+
+const BUDGET_LINE_LIST_COLUMNS =
+  'b.id, b.tenant_id, b.site_id, b.item_id, b.description, b.qty_planned, b.unit_cost, b.active, ' +
+  'i.sku AS item_sku, i.name AS item_name';
+const BUDGET_LINE_LIST_JOIN =
+  'FROM budget_lines b LEFT JOIN inventory_items i ON i.id = b.item_id AND i.tenant_id = b.tenant_id';
+
+/**
+ * Budget lines of a site (`site.read`), alphabetical and capped at
+ * `OBRA_RESOURCE_LIST_LIMIT`. The catalogue names ride along via
+ * `JOIN inventory_items`, so the screen renders sku/name instead of a UUID.
+ * Same read contract as `listProgressEntries`: the site guard (central rule
+ * plus the assignment key) owns the denial audit and a successful read
+ * writes no audit row — reads are not writes (§4.4).
+ */
+export async function listBudgetLines(
+  actor: ObraActorContext,
+  siteId: string,
+  query: unknown = {},
+): Promise<BudgetLineWithItem[]> {
+  const filters = parseBudgetLineListFilters(query, actor.traceId);
+  const { site } = await requireSiteAction(actor, siteId, 'site.read', {
+    entity: 'budget_line',
+    attemptedAction: 'budget_line.list',
+  });
+  const conditions = ['b.tenant_id = $1', 'b.site_id = $2'];
+  const values: unknown[] = [actor.tenantId, site.id];
+  if (filters.active !== null) {
+    values.push(filters.active);
+    conditions.push(`b.active = $${values.length}`);
+  }
+  const result = await actor.client.query(
+    `SELECT ${BUDGET_LINE_LIST_COLUMNS} ${BUDGET_LINE_LIST_JOIN} ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY b.description ASC, b.id ASC LIMIT ${OBRA_RESOURCE_LIST_LIMIT}`,
+    values,
+  );
+  return readRows(result).map(mapBudgetLineWithItem);
+}
+
+/**
+ * Keyset page of the budget lines of a site.
+ *
+ * Stable order: `description ASC, id ASC` — the legacy alphabetical order
+ * plus the `id` tiebreaker, so equal descriptions paginate deterministically
+ * (`description` carries no UNIQUE). The cursor is the opaque base64url of
+ * the last row's `{description, id}`; the query fetches `limit + 1` rows and
+ * a non-null `nextCursor` means there is another page. The `?active=` filter
+ * ANDs with the keyset predicate, so a filtered walk stays inside the filter.
+ */
+export async function listBudgetLinesPage(
+  actor: ObraActorContext,
+  siteId: string,
+  options: BudgetLinePageInput = {},
+): Promise<ResourcePage<BudgetLineWithItem>> {
+  const filters = parseBudgetLineListFilters(options, actor.traceId);
+  const limit = parseResourcePageLimit(options.limit, actor.traceId);
+  const { site } = await requireSiteAction(actor, siteId, 'site.read', {
+    entity: 'budget_line',
+    attemptedAction: 'budget_line.list',
+  });
+  let cursorDescription: string | null = null;
+  let cursorId: string | null = null;
+  const rawCursor = typeof options.cursor === 'string' ? options.cursor.trim() : '';
+  if (rawCursor !== '') {
+    const payload = decodeResourcePageCursor(rawCursor, actor.traceId);
+    cursorDescription = payload.description ?? null;
+    cursorId = payload.id ?? null;
+    if (cursorDescription === null || cursorId === null) {
+      throw badRequest('Invalid pagination cursor', actor.traceId);
+    }
+    if (!UUID_RE.test(cursorId)) throw badRequest('Invalid pagination cursor', actor.traceId);
+  }
+  const conditions = ['b.tenant_id = $1', 'b.site_id = $2'];
+  const values: unknown[] = [actor.tenantId, site.id];
+  if (filters.active !== null) {
+    values.push(filters.active);
+    conditions.push(`b.active = $${values.length}`);
+  }
+  if (cursorDescription !== null && cursorId !== null) {
+    values.push(cursorDescription, cursorId);
+    const descriptionParam = values.length - 1;
+    const idParam = values.length;
+    conditions.push(
+      `(b.description > $${descriptionParam} OR ` +
+        `(b.description = $${descriptionParam} AND b.id > $${idParam}::uuid))`,
+    );
+  }
+  const result = await actor.client.query(
+    `SELECT ${BUDGET_LINE_LIST_COLUMNS} ${BUDGET_LINE_LIST_JOIN} ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY b.description ASC, b.id ASC LIMIT ${limit + 1}`,
+    values,
+  );
+  const rows = readRows(result).map(mapBudgetLineWithItem);
+  if (rows.length <= limit) return { rows, nextCursor: null };
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  if (last === undefined) return { rows: page, nextCursor: null };
+  return {
+    rows: page,
+    nextCursor: encodeResourcePageCursor({ description: last.description, id: last.id }),
+  };
 }
 
 interface ProgressInput {

@@ -13,16 +13,19 @@
 // drift. W3 is the consumer of the write half.
 import { z } from 'zod';
 import { isoValueSchema, jsonArraySchema, jsonObjectSchema, uuidSchema } from './common.ts';
+import { pagedListSchema, paginationQuerySchema } from './pagination.ts';
 
 /** Default Peruvian IGV rate (peru-anexo-v1.md §3.1). */
 export const DEFAULT_IGV_RATE = 0.18;
 
-/** `POST /v1/billing/cash-sessions/open|close` — one cashier shift. */
+/** `POST /v1/billing/cash-sessions/open|close`, `GET /v1/billing/cash-sessions` — one cashier shift. */
 export const cashSessionRecordSchema = z.object({
   id: uuidSchema,
   tenantId: uuidSchema,
   orgNodeId: uuidSchema,
   openedBy: uuidSchema,
+  /** Opener display name via `JOIN users` on the list reads; `null` on the open/close writes. */
+  openedByName: z.string().nullable(),
   openedAt: isoValueSchema,
   closedAt: isoValueSchema,
   /** Per-method totals accumulated while the shift is open. */
@@ -113,6 +116,41 @@ export type QuoteList = z.infer<typeof quoteListSchema>;
  */
 export const invoiceListSchema = z.array(invoiceRecordSchema);
 export type InvoiceList = z.infer<typeof invoiceListSchema>;
+
+/** `cash_sessions.status` (the CHECK of `003_salud.sql`). */
+export const CASH_SESSION_STATUSES = ['open', 'closed'] as const;
+export const cashSessionStatusSchema = z.enum(CASH_SESSION_STATUSES);
+export type CashSessionStatus = z.infer<typeof cashSessionStatusSchema>;
+
+/**
+ * `GET /v1/billing/cash-sessions` — bare array capped at `BILLING_LIST_LIMIT`
+ * (200), newest first. Every row carries `openedByName`, so the screen never
+ * renders the opener UUID.
+ */
+export const cashSessionListSchema = z.array(cashSessionRecordSchema);
+export type CashSessionList = z.infer<typeof cashSessionListSchema>;
+
+/**
+ * Query filters of `GET /v1/billing/cash-sessions`, field-for-field what the
+ * service parser (`parseCashSessionListFilters` in `billing.service.ts`)
+ * accepts: the shift status, the sede and an opening window over
+ * `opened_at`. Every field is optional and an empty string counts as absent.
+ */
+export const cashSessionListQuerySchema = z.object({
+  status: cashSessionStatusSchema.nullable().optional(),
+  orgNodeId: uuidSchema.nullable().optional(),
+  from: z.string().min(1).nullable().optional(),
+  to: z.string().min(1).nullable().optional(),
+});
+export type CashSessionListQuery = z.infer<typeof cashSessionListQuerySchema>;
+
+/** Keyset query (`?cursor=` / `?limit=`) shared with every R1 listing. */
+export const cashSessionPageQuerySchema = paginationQuerySchema;
+export type CashSessionPageQuery = z.infer<typeof cashSessionPageQuerySchema>;
+
+/** Keyset page of `GET /v1/billing/cash-sessions` (`{rows, nextCursor}`). */
+export const cashSessionPagedSchema = pagedListSchema(cashSessionRecordSchema);
+export type CashSessionPaged = z.infer<typeof cashSessionPagedSchema>;
 
 // ============ state catalogs ============
 //
