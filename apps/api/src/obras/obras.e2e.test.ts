@@ -295,7 +295,7 @@ async function auditByTrace(traceId: string): Promise<AuditRow[]> {
  * has already read the body, so a write made by the handler can be a few
  * milliseconds behind the HTTP response on a separate connection.
  */
-async function waitFor<T>(read: () => Promise<T | null>, attempts = 40): Promise<T | null> {
+async function waitFor<T>(read: () => Promise<T | null>, attempts = 80): Promise<T | null> {
   let value: T | null = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     value = await read();
@@ -327,6 +327,113 @@ async function attendanceRowEventually(
     if (result.rowCount !== 1) return null;
     const row = result.rows[0] as Record<string, unknown>;
     return row.status === expectedStatus ? row : null;
+  });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+/**
+ * GET until it returns 200. The finish-commit race means a row created by a
+ * 201 in this same run can 404 on the next request; polling the GET keeps
+ * that transient 404 from failing the suite. Only the id from the prior 201
+ * is polled, so a genuinely missing row still fails when the caller asserts
+ * the final 200. Denials (403/400/409) are never retried by callers.
+ */
+async function getByIdEventually(
+  path: string,
+  actor: Actor,
+  attempts = 80,
+): Promise<HttpResult> {
+  let last = await call('GET', path, actor);
+  for (let attempt = 1; attempt < attempts && last.status !== 200; attempt += 1) {
+    await delay(25);
+    last = await call('GET', path, actor);
+  }
+  return last;
+}
+
+/**
+ * A write (POST/PATCH) that retries only the transient 404 signature of the
+ * finish-commit race. Any other status (200/201/400/403/409) returns
+ * immediately, so real denials and validation errors are never masked.
+ */
+async function writeEventually(
+  method: string,
+  path: string,
+  actor: Actor,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<HttpResult> {
+  let result = await call(method, path, actor, body, extraHeaders);
+  for (let attempt = 1; attempt < 80 && result.status === 404; attempt += 1) {
+    await delay(25);
+    result = await call(method, path, actor, body, extraHeaders);
+  }
+  return result;
+}
+
+/** One `sites` row visible over HTTP once its 201 transaction committed. */
+async function siteVisible(siteId: string, actor: Actor = GERENTE): Promise<HttpResult> {
+  return getByIdEventually(`/v1/obras/sites/${siteId}`, actor);
+}
+
+/** One `assets` row visible once its 201 transaction committed (no GET by id). */
+async function assetVisible(assetId: string): Promise<Record<string, unknown> | null> {
+  return waitFor(async () => {
+    const result = await db.query(`SELECT id FROM assets WHERE tenant_id = $1 AND id = $2`, [
+      TENANT_OBRA,
+      assetId,
+    ]);
+    return result.rowCount === 1 ? (result.rows[0] as Record<string, unknown>) : null;
+  });
+}
+
+/** One `inventory_items` row visible once its 201 transaction committed. */
+async function itemVisible(itemId: string): Promise<Record<string, unknown> | null> {
+  return waitFor(async () => {
+    const result = await db.query(
+      `SELECT id FROM inventory_items WHERE tenant_id = $1 AND id = $2`,
+      [TENANT_OBRA, itemId],
+    );
+    return result.rowCount === 1 ? (result.rows[0] as Record<string, unknown>) : null;
+  });
+}
+
+/** One `stock_moves` row visible once its 201 transaction committed. */
+async function moveVisible(moveId: string): Promise<Record<string, unknown> | null> {
+  return waitFor(async () => {
+    const result = await db.query(`SELECT id FROM stock_moves WHERE tenant_id = $1 AND id = $2`, [
+      TENANT_OBRA,
+      moveId,
+    ]);
+    return result.rowCount === 1 ? (result.rows[0] as Record<string, unknown>) : null;
+  });
+}
+
+/** One `site_logs` row visible once its 201 transaction committed. */
+async function logVisible(logId: string): Promise<Record<string, unknown> | null> {
+  return waitFor(async () => {
+    const result = await db.query(`SELECT id FROM site_logs WHERE tenant_id = $1 AND id = $2`, [
+      TENANT_OBRA,
+      logId,
+    ]);
+    return result.rowCount === 1 ? (result.rows[0] as Record<string, unknown>) : null;
+  });
+}
+
+/** An active `assignments` row visible once its 201 transaction committed. */
+async function assignmentVisible(
+  userId: string,
+  siteId: string,
+): Promise<Record<string, unknown> | null> {
+  return waitFor(async () => {
+    const result = await db.query(
+      `SELECT id FROM assignments WHERE tenant_id = $1 AND user_id = $2 AND site_id = $3 AND active = TRUE`,
+      [TENANT_OBRA, userId, siteId],
+    );
+    return result.rowCount >= 1 ? (result.rows[0] as Record<string, unknown>) : null;
   });
 }
 
@@ -413,7 +520,9 @@ describe('obras API e2e (local stack)', () => {
 
   it('jefe_obra assigns a worker and a second call is idempotent', async (t) => {
     if (!stackReady || obraAId === '') return t.skip('local stack unavailable');
-    const assigned = await call('POST', `/v1/obras/sites/${obraAId}/staff`, JEFE, {
+    // The site 201 commits on `finish`; the assign reads it, so poll first.
+    assert.equal((await siteVisible(obraAId)).status, 200, 'the site is committed');
+    const assigned = await writeEventually('POST', `/v1/obras/sites/${obraAId}/staff`, JEFE, {
       userId: U_WORKER,
       crewId: CREW_A,
       roleInSite: 'oficial',
@@ -436,6 +545,9 @@ describe('obras API e2e (local stack)', () => {
 
   it('the worker marks its own attendance and the write is audited', async (t) => {
     if (!stackReady || obraAId === '') return t.skip('local stack unavailable');
+    // The assignment 201 commits on `finish`; marking before it lands reads
+    // as `no_active_assignment` (403), so poll the assignment first.
+    assert.notEqual(await assignmentVisible(U_WORKER, obraAId), null, 'the assignment is committed');
     const marked = await call('POST', '/v1/obras/attendance', WORKER, { siteId: obraAId });
     assert.equal(marked.status, 201, JSON.stringify(marked.body));
     assert.equal(marked.body.userId, U_WORKER);
@@ -448,16 +560,20 @@ describe('obras API e2e (local stack)', () => {
 
   it('the capataz approves the mark of its own crew', async (t) => {
     if (!stackReady) return t.skip('local stack unavailable');
-    const list = await call('GET', `/v1/obras/attendance?site=${obraAId}&date=${today()}`, JEFE);
-    assert.equal(list.status, 200);
-    assert.ok(Array.isArray(list.body));
-    const mine = (list.body as unknown as Record<string, unknown>[]).find(
-      (row) => row.userId === U_WORKER && row.siteId === obraAId,
-    );
-    assert.notEqual(mine, undefined, 'the mark is visible to the jefe');
-    const attendanceId = String(mine?.id);
+    // The mark 201 commits on `finish`; poll the listing until the row is
+    // readable so the approve cannot hit a transient 404.
+    const mine = await waitFor(async () => {
+      const list = await call('GET', `/v1/obras/attendance?site=${obraAId}&date=${today()}`, JEFE);
+      if (list.status !== 200 || !Array.isArray(list.body)) return null;
+      const found = (list.body as unknown as Record<string, unknown>[]).find(
+        (row) => row.userId === U_WORKER && row.siteId === obraAId,
+      );
+      return found ?? null;
+    });
+    assert.notEqual(mine, null, 'the mark is visible to the jefe');
+    const attendanceId = String((mine as Record<string, unknown>)?.id);
 
-    const approved = await call('POST', `/v1/obras/attendance/${attendanceId}/approve`, CAPATAZ);
+    const approved = await writeEventually('POST', `/v1/obras/attendance/${attendanceId}/approve`, CAPATAZ);
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.status, 'approved');
     assert.equal(approved.body.approvedBy, U_CAPATAZ);
@@ -582,6 +698,7 @@ describe('obras API e2e (local stack)', () => {
     assert.equal(created.body.status, 'available');
     assert.equal(created.body.currentSiteId, null);
     assetId = String(created.body.id);
+    assert.notEqual(await assetVisible(assetId), null, 'the asset is committed');
     const audit = await auditByTraceEventually(created.traceId);
     assert.equal(audit[0]?.action, 'asset.created');
     assert.equal(audit[0]?.entity, 'asset');
@@ -589,7 +706,9 @@ describe('obras API e2e (local stack)', () => {
 
   it('jefe_obra assigns the equipment to the site', async (t) => {
     if (!stackReady || obraAId === '' || assetId === '') return t.skip('local stack unavailable');
-    const assigned = await call('POST', `/v1/obras/assets/${assetId}/assign`, JEFE, {
+    assert.equal((await siteVisible(obraAId)).status, 200, 'the site is committed');
+    assert.notEqual(await assetVisible(assetId), null, 'the asset is committed');
+    const assigned = await writeEventually('POST', `/v1/obras/assets/${assetId}/assign`, JEFE, {
       siteId: obraAId,
     });
     assert.equal(assigned.status, 200, JSON.stringify(assigned.body));
@@ -601,7 +720,8 @@ describe('obras API e2e (local stack)', () => {
 
   it('the assigned worker records an horometer reading (append-only)', async (t) => {
     if (!stackReady || assetId === '') return t.skip('local stack unavailable');
-    const reading = await call('POST', `/v1/obras/assets/${assetId}/readings`, WORKER, {
+    assert.notEqual(await assetVisible(assetId), null, 'the asset is committed');
+    const reading = await writeEventually('POST', `/v1/obras/assets/${assetId}/readings`, WORKER, {
       kind: 'horometro',
       value: 12.5,
     });
@@ -637,8 +757,9 @@ describe('obras API e2e (local stack)', () => {
     assert.equal(item.status, 201, JSON.stringify(item.body));
     itemId = String(item.body.id);
     assert.equal((await auditByTraceEventually(item.traceId))[0]?.action, 'inventory_item.created');
+    assert.notEqual(await itemVisible(itemId), null, 'the item is committed');
 
-    const inbound = await call('POST', '/v1/obras/stock/moves', ALMACEN, {
+    const inbound = await writeEventually('POST', '/v1/obras/stock/moves', ALMACEN, {
       itemId,
       warehouseNodeId: NODE_A,
       qty: 10,
@@ -663,8 +784,9 @@ describe('obras API e2e (local stack)', () => {
     assert.equal(outbound.body.status, 'posted');
     assert.equal(outbound.body.siteId, obraAId);
     const moveId = String(outbound.body.id);
+    assert.notEqual(await moveVisible(moveId), null, 'the move is committed');
 
-    const reversed = await call('POST', `/v1/obras/stock/moves/${moveId}/reverse`, ALMACEN);
+    const reversed = await writeEventually('POST', `/v1/obras/stock/moves/${moveId}/reverse`, ALMACEN);
     assert.equal(reversed.status, 200, JSON.stringify(reversed.body));
     assert.equal(reversed.body.status, 'reversed');
     const audit = await auditByTraceEventually(reversed.traceId);
@@ -690,7 +812,7 @@ describe('obras API e2e (local stack)', () => {
     budgetLineId = String(line.body.id);
     assert.equal((await auditByTraceEventually(line.traceId))[0]?.action, 'budget_line.created');
 
-    const entry = await call('POST', '/v1/obras/progress/entries', JEFE, {
+    const entry = await writeEventually('POST', '/v1/obras/progress/entries', JEFE, {
       siteId: obraAId,
       budgetLineId,
       qtyDone: 30,
@@ -709,10 +831,20 @@ describe('obras API e2e (local stack)', () => {
     });
     assert.equal(second.status, 201, JSON.stringify(second.body));
 
-    const list = await call('GET', `/v1/obras/progress/entries?site=${obraAId}`, JEFE);
-    assert.equal(list.status, 200);
-    const entries = list.body as unknown as Record<string, unknown>[];
-    const total = entries.reduce((sum, row) => sum + Number(row.qtyDone), 0);
+    // The second entry 201 commits on `finish`; poll the listing until both
+    // entries are readable so the total cannot observe a partial sum.
+    const entries = await waitFor(async () => {
+      const list = await call('GET', `/v1/obras/progress/entries?site=${obraAId}`, JEFE);
+      if (list.status !== 200 || !Array.isArray(list.body)) return null;
+      const rows = list.body as unknown as Record<string, unknown>[];
+      const total = rows.reduce((sum, row) => sum + Number(row.qtyDone), 0);
+      return total === 42.5 ? rows : null;
+    });
+    assert.notEqual(entries, null, 'both entries are committed');
+    const total = (entries as unknown as Record<string, unknown>[]).reduce(
+      (sum, row) => sum + Number(row.qtyDone),
+      0,
+    );
     assert.equal(total, 42.5, JSON.stringify(entries));
   });
 
@@ -725,8 +857,9 @@ describe('obras API e2e (local stack)', () => {
     assert.equal(created.body.status, 'draft');
     siteLogId = String(created.body.id);
     assert.equal((await auditByTraceEventually(created.traceId))[0]?.action, 'site_log.created');
+    assert.notEqual(await logVisible(siteLogId), null, 'the log is committed');
 
-    const published = await call(
+    const published = await writeEventually(
       'POST',
       `/v1/obras/sites/${obraAId}/logs/${siteLogId}/publish`,
       JEFE,
