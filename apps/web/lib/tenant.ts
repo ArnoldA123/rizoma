@@ -180,7 +180,7 @@ export function deriveIdentity(input: {
         ok: false,
         code: 'auth.token_invalid',
         reason: 'token.malformed',
-        message: 'El token de acceso no tiene el formato esperado.',
+        message: 'No pudimos leer su sesión. Entre de nuevo.',
       };
     }
     const tenantClaim = readTenantClaim(payload);
@@ -189,8 +189,7 @@ export function deriveIdentity(input: {
         ok: false,
         code: 'tenant.missing',
         reason: 'tenant.missing',
-        message:
-          'El token no trae un tenant válido (claims tenant_id o azp con formato UUID v4).',
+        message: 'No encontramos su organización. Entre de nuevo o avise a soporte.',
       };
     }
     const userId = readString(payload.sub);
@@ -199,7 +198,7 @@ export function deriveIdentity(input: {
         ok: false,
         code: 'tenant.user_invalid',
         reason: 'tenant.user_invalid',
-        message: 'El token no trae un identificador de usuario (sub) con formato UUID.',
+        message: 'No encontramos su usuario. Entre de nuevo o avise a soporte.',
       };
     }
     return {
@@ -222,8 +221,7 @@ export function deriveIdentity(input: {
       ok: false,
       code: 'tenant.missing',
       reason: 'tenant.missing',
-      message:
-        'Sin sesión de Keycloak y sin identidad local (x-tenant-id + x-user-id) configurada.',
+      message: 'Sin sesión. Entre con su cuenta para continuar.',
     };
   }
   if (!UUID_V4_RE.test(devTenant)) {
@@ -231,7 +229,7 @@ export function deriveIdentity(input: {
       ok: false,
       code: 'tenant.missing',
       reason: 'tenant.missing',
-      message: 'x-tenant-id no es un UUID v4.',
+      message: 'La identidad local no es válida. Avise a soporte.',
     };
   }
   if (!UUID_RE.test(devUser)) {
@@ -239,7 +237,7 @@ export function deriveIdentity(input: {
       ok: false,
       code: 'tenant.user_invalid',
       reason: 'tenant.user_invalid',
-      message: 'x-user-id no es un UUID.',
+      message: 'La identidad local no es válida. Avise a soporte.',
     };
   }
   const devRole = readString(dev.role ?? undefined);

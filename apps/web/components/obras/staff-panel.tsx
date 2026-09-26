@@ -250,10 +250,17 @@ export function StaffPanel({ siteId, canAssign, staff, className }: StaffPanelPr
         ) : (
           <div className="flex flex-col gap-2 border-t border-border pt-4">
             <p className="text-xs text-muted-foreground">
-              Su rol no tiene <code className="font-mono">assignment.write</code>: la asignación y el
-              cierre no se ofrecen porque el API los respondería con{' '}
-              <code className="font-mono">obra.scope_denied</code>.
+              Su rol no puede asignar personal ni cerrar asignaciones en esta obra: esas opciones
+              no se ofrecen. Si necesita este acceso, avise a jefatura o a soporte.
             </p>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                Copiar detalle
+              </summary>
+              <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                {`code: obra.scope_denied\nstatus: 403\naction: assignment.write`}
+              </pre>
+            </details>
             <WriteResult failure={failure} success={success} />
           </div>
         )}

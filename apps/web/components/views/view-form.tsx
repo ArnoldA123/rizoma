@@ -9,6 +9,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createSavedView, updateSavedView } from '@/lib/views-api';
 
@@ -158,11 +159,7 @@ export function ViewForm({ entity, initial = null, onSaved, onCancel }: ViewForm
         </label>
       </div>
 
-      {failure !== null ? (
-        <p className="text-xs text-danger" role="alert">
-          {failure.message}
-        </p>
-      ) : null}
+      {failure !== null ? <WriteResult failure={failure} success={null} /> : null}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="primary" size="sm" disabled={saving} onClick={() => void handleSave()}>

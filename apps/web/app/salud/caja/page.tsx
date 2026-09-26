@@ -34,11 +34,17 @@ export default function SaludCajaPage() {
 
       <ScopeNote eyebrow="Regla de acceso" title="Médico nunca ve importes">
         <p>
-          La ruta exige <code className="font-mono text-xs">invoice.issue</code>, que solo tiene caja.
-          Médico y recepción reciben la denegación con motivo{' '}
-          <code className="font-mono text-xs">role.denied</code> antes de que exista una sola llamada
-          a facturación.
+          La ruta solo la abre caja. Médico y recepción reciben la denegación antes de que exista
+          una sola llamada a facturación. Si necesita este acceso, avise a jefatura o a soporte.
         </p>
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+            Copiar detalle
+          </summary>
+          <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+            {`code: access.denied\nreason: role.denied\nstatus: 403\naction: invoice.issue`}
+          </pre>
+        </details>
         <p>
           En la dirección contraria, el contrato de facturación no declara ningún campo clínico: el
           comprobante nombra un cliente, un documento, importes y un estado fiscal. El esquema de{' '}

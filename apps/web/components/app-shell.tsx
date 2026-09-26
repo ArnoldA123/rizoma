@@ -2,7 +2,7 @@ import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { AppNav } from '@/components/app-nav';
 import { DisplayControls } from '@/components/display-controls';
-import { GuardNote, SessionChip } from '@/components/session-chip';
+import { SessionChip } from '@/components/session-chip';
 import type { AppRoute, SkinId } from '@/lib/navigation';
 import { SECTION_LABELS } from '@/lib/labels';
 import { primaryRole } from '@/lib/tenant';
@@ -76,7 +76,6 @@ export function AppShell({ skin, pathname, route, session, children }: AppShellP
           <p className="text-[0.6875rem] text-muted-foreground">
             MVP1 · datos sintéticos de demostración · sin datos clínicos reales
           </p>
-          <GuardNote />
         </div>
       </footer>
     </div>

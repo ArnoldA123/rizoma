@@ -253,8 +253,17 @@ export function PatientsBrowser({ role, canRead, canWrite }: PatientsBrowserProp
         <EmptyState
           eyebrow="Capacidad separada"
           title={`${roleLabel(role)} no lista fichas existentes`}
-          description="El rol no tiene patient.read, así que la lista no se ofrece: GET /v1/salud/patients respondería 403 con code access.denied y reason role.denied. Sí puede registrar una ficha nueva, y la confirmación de abajo es lo que queda a la vista."
+          description="Este rol no muestra la lista de fichas: no tiene permiso para verlas. Sí puede registrar una ficha nueva con el formulario, y la confirmación de abajo es lo que queda a la vista. Si necesita este acceso, avise a jefatura o a soporte."
         >
+          <div className="flex flex-col gap-3">
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                Copiar detalle
+              </summary>
+              <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                {`code: access.denied\nreason: role.denied\nstatus: 403\naction: patient.read\nroute: GET /v1/salud/patients`}
+              </pre>
+            </details>
           {lastCreated === null ? (
             <p className="text-xs text-muted-foreground">
               Todavía no hay una ficha registrada en esta sesión.
@@ -273,6 +282,7 @@ export function PatientsBrowser({ role, canRead, canWrite }: PatientsBrowserProp
               </p>
             </div>
           )}
+          </div>
         </EmptyState>
       )}
 

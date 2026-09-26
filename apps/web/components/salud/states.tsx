@@ -1,25 +1,72 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Alert } from '@/components/ui/alert';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { IconAlertTriangle, IconLock } from '@/components/ui/icons';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import type { ApiFailure } from '@/lib/salud-errors';
+import { cn } from '@/lib/utils';
 
 /**
  * The two states a Salud panel shows instead of rows: a classified failure and a
  * typed empty result.
  *
- * Both are deliberate about what they display. A failure shows the four facts the
- * contract allows (`code`, `reason`, `traceId`, and the envelope message) and
- * nothing else — no tenant data, no record body, no stack — because a refusal
- * must not become an information channel. An empty state says *why* it is empty,
+ * Both are deliberate about what they display. A failure shows a warm motive,
+ * what to do and who to tell — and nothing else — in the visible body. The
+ * four machine facts (`code`, `reason`, `status`, `traceId`) live only inside
+ * the collapsed "Copiar detalle", with no tenant data, no record body and
+ * no stack, because a refusal must not become an information channel.
+ * An empty state says *why* it is empty,
  * which is the difference between "no hay pacientes" and "no pude leer la
  * lista": the second one is a failure, not an absence of data.
  */
 
-/** Envelope fields, rendered as the `dl` every denial and failure shares. */
+/**
+ * Collapsed technical detail with a copy affordance (P1-1 `CopyDetail`
+ * pattern, duplicated here on purpose: sharing it would touch files outside
+ * the P1-2 surfaces). The machine fields live only inside this collapsible.
+ */
+function CopyDetail({ failure }: { readonly failure: ApiFailure }) {
+  const [copied, setCopied] = useState(false);
+  const text = `code: ${failure.code}\nreason: ${failure.reason ?? '\u2014'}\nstatus: ${failure.status ?? '\u2014'}\ntraceId: ${failure.traceId ?? '\u2014'}`;
+
+  async function copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const area = document.createElement('textarea');
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      document.body.removeChild(area);
+    }
+    setCopied(true);
+  }
+
+  return (
+    <details className="mt-3 text-xs">
+      <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+        Copiar detalle
+      </summary>
+      <EnvelopeFields failure={failure} />
+      <button
+        type="button"
+        onClick={() => void copy()}
+        className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'mt-2')}
+      >
+        {copied ? 'Copiado' : 'Copiar'}
+      </button>
+    </details>
+  );
+}
+
+/**
+ * Envelope fields. They render only inside the collapsed `Copiar detalle` of
+ * a failure, never in the visible body: a refusal must not show codes,
+ * reasons or trace ids at a glance.
+ */
 export function EnvelopeFields({ failure }: { readonly failure: ApiFailure }) {
   return (
     <dl className="tabular mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
@@ -59,7 +106,8 @@ export function FailurePanel({ title, failure, onRetry, className }: FailurePane
     >
       <p>{failure.message}</p>
       {failure.hint === '' ? null : <p className="mt-1">{failure.hint}</p>}
-      <EnvelopeFields failure={failure} />
+      <p className="mt-1">Si el problema sigue, avise a jefatura o a soporte.</p>
+      <CopyDetail failure={failure} />
       {onRetry === undefined ? null : (
         <div className="mt-3">
           <Button variant="outline" size="sm" onClick={onRetry}>

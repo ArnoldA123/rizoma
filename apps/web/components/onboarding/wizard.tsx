@@ -6,11 +6,12 @@ import { ApiRequestError } from '@/lib/api-client';
 import { getOnboardingStatus, submitOnboardingStep } from '@/lib/onboarding-api';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Field, Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { DEMO_RUC_PLACEHOLDER, WIZARD_STEPS, emptyStepPayload } from './steps';
+import { cn } from '@/lib/utils';
 
 /** Renderable failure: the four envelope facts, never tenant data. */
 interface WizardFailure {
@@ -39,6 +40,53 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function textOf(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+/**
+ * Collapsed technical detail with a copy affordance (P1-1 `CopyDetail`
+ * pattern, duplicated here on purpose: sharing it would touch files outside
+ * the P1 surfaces). The machine fields live only inside this collapsible.
+ */
+function CopyDetail({ failure }: { readonly failure: WizardFailure }) {
+  const [copied, setCopied] = useState(false);
+  const text = `code: ${failure.code}\nreason: ${failure.reason ?? '\u2014'}\ntraceId: ${failure.traceId ?? '\u2014'}`;
+
+  async function copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const area = document.createElement('textarea');
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      document.body.removeChild(area);
+    }
+    setCopied(true);
+  }
+
+  return (
+    <details className="mt-3 text-xs">
+      <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+        Copiar detalle
+      </summary>
+      <dl className="tabular mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">code</dt>
+        <dd className="font-mono break-all">{failure.code}</dd>
+        <dt className="text-muted-foreground">reason</dt>
+        <dd className="font-mono break-all">{failure.reason ?? '\u2014'}</dd>
+        <dt className="text-muted-foreground">traceId</dt>
+        <dd className="font-mono break-all">{failure.traceId ?? '\u2014'}</dd>
+      </dl>
+      <button
+        type="button"
+        onClick={() => void copy()}
+        className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'mt-2')}
+      >
+        {copied ? 'Copiado' : 'Copiar'}
+      </button>
+    </details>
+  );
 }
 
 interface SiteDraft {
@@ -209,12 +257,9 @@ export function OnboardingWizard() {
     return (
       <Alert variant="info" title="El alta no se pudo leer">
         <p>{loadFailure.message}</p>
-        <dl className="tabular mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-          <dt className="text-muted-foreground">code</dt>
-          <dd className="font-mono break-all">{loadFailure.code}</dd>
-          <dt className="text-muted-foreground">traceId</dt>
-          <dd className="font-mono break-all">{loadFailure.traceId ?? '—'}</dd>
-        </dl>
+        <p className="mt-1">Vuelva a cargar la página para intentarlo de nuevo.</p>
+        <p className="mt-1">Si el problema sigue, avise a soporte.</p>
+        <CopyDetail failure={loadFailure} />
         <div className="mt-3">
           <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
             Reintentar
@@ -531,14 +576,9 @@ export function OnboardingWizard() {
           {submitFailure !== null ? (
             <Alert variant={submitFailure.code === 'access.denied' ? 'denied' : 'info'} title="El paso no se aplicó">
               <p>{submitFailure.message}</p>
-              <dl className="tabular mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                <dt className="text-muted-foreground">code</dt>
-                <dd className="font-mono break-all">{submitFailure.code}</dd>
-                <dt className="text-muted-foreground">reason</dt>
-                <dd className="font-mono break-all">{submitFailure.reason ?? '—'}</dd>
-                <dt className="text-muted-foreground">traceId</dt>
-                <dd className="font-mono break-all">{submitFailure.traceId ?? '—'}</dd>
-              </dl>
+              <p className="mt-1">Revise el paso e intente de nuevo.</p>
+              <p className="mt-1">Si el problema sigue, avise a jefatura o a soporte.</p>
+              <CopyDetail failure={submitFailure} />
             </Alert>
           ) : null}
 

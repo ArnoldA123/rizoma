@@ -254,10 +254,18 @@ export function StockPanel({
         {canConsume ? (
           <form className="flex flex-col gap-4" onSubmit={handleItem} noValidate>
             <p className="text-xs text-muted-foreground">
-              El ítem se crea con <code className="font-mono">stock.consume</code> a nivel de
-              organización: el almacén no necesita asignación a la obra, y el panel solo aparece
-              dentro de la ficha cuando la clave de acceso a la obra ya se resolvió.
+              El ítem se crea a nivel de organización: el almacén no necesita asignación a la obra,
+              y el panel solo aparece dentro de la ficha cuando la clave de acceso a la obra ya se
+              resolvió.
             </p>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                Copiar detalle
+              </summary>
+              <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                {`action: stock.consume`}
+              </pre>
+            </details>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <LiveField id="item-sku" label="SKU" issue={itemChecks.sku ?? null} touched={show('sku')} hint="Único en el tenant.">
                 <Input
@@ -401,11 +409,20 @@ export function StockPanel({
             </div>
           </form>
         ) : (
-          <p className="text-xs text-muted-foreground border-t border-border pt-4">
-            Su rol no tiene <code className="font-mono">stock.consume</code>: crear ítems, registrar
-            movimientos y revertirlos no se ofrece porque el API lo respondería con{' '}
-            <code className="font-mono">obra.scope_denied</code>.
-          </p>
+          <div className="flex flex-col gap-2 border-t border-border pt-4">
+            <p className="text-xs text-muted-foreground">
+              Su rol no puede crear ítems ni registrar movimientos en esta obra: esas opciones no
+              se ofrecen. Si necesita este acceso, avise a jefatura o a soporte.
+            </p>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground underline underline-offset-2">
+                Copiar detalle
+              </summary>
+              <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+                {`code: obra.scope_denied\nstatus: 403\naction: stock.consume`}
+              </pre>
+            </details>
+          </div>
         )}
 
         <div className="flex flex-col gap-3 border-t border-border pt-4">
