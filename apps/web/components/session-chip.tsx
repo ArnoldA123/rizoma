@@ -28,12 +28,8 @@ export function SessionChip({ session }: SessionChipProps) {
   if (!identity.ok) {
     return (
       <div className="flex items-center gap-2">
-        <Badge variant="outline">{identity.reason}</Badge>
-        <Link
-          href="/api/auth/login"
-          className={cn(buttonVariants({ variant: 'primary', size: 'sm' }))}
-        >
-          Iniciar sesión
+        <Link href="/login" className={cn(buttonVariants({ variant: 'primary', size: 'sm' }))}>
+          Entre aquí
         </Link>
       </div>
     );

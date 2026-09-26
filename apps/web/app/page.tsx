@@ -29,11 +29,6 @@ export default async function HomePage() {
   if (!session.identity.ok) {
     return (
       <div className="flex flex-col gap-8">
-        <PageHeader
-          eyebrow="MVP1 · base web + autenticación + contratos"
-          title="Rizoma"
-          description="La identidad y el tenant se resuelven antes de cualquier decisión de acceso."
-        />
         <SessionRequiredNotice
           code={session.identity.code}
           reason={session.identity.reason}

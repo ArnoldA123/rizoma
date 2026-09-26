@@ -9,7 +9,7 @@
 - [x] P1-1 `denied-notice.tsx` + `session-required-notice.tsx`: denegación cálida y breve con motivo + qué hacer + rol destino + "Copiar detalle" oculto. Verde: page-guard/access 18 pass, tsc limpio. Veredicto verify PASS.
 - [x] P1-2 `ui/states.tsx` + `salud/states.tsx` + `salud-errors.ts`: estados genéricos sin jerga, sin inglés snake_case. Verde: web 137 pass, tsc limpio. Verify PASS + fix doble "su rol" verificado (18 pass, tsc limpio).
 - [x] P1-3 Paneles salud/obras/tableros: quitar EnvelopeFields visibles, mover a "Copiar detalle". Verde: web 137 pass, tsc limpio. Verify PASS (cero failure.message directo, cero imports EnvelopeFields).
-- [ ] P1-4 Sin sesión: mensaje único "Entre aquí" → `/login`, sin rebote login↔inicio
+- [x] P1-4 Sin sesión: mensaje único "Entre aquí" → `/login`, sin rebote login↔inicio. Verde: web 137 pass, tsc limpio. Verify PASS (protección intacta, residual con sesión va a P1-5).
 - [ ] P1-5 Cierre: suites en verde + clics por rol + aceptación (ninguna pantalla muestra UUID/código salvo tras "Copiar detalle")
 
 ## Fuera
