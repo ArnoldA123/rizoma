@@ -40,7 +40,7 @@ export interface ApiFailure {
   /** Guard reason of a denial, when the API sent one. */
   readonly reason: string | null;
   readonly traceId: string | null;
-  /** Human message from the envelope, or a local neutral one. */
+  /** Warm motive line in neutral Spanish (never the raw envelope message). */
   readonly message: string;
   /** What the user can do about it; never a guess about remote state. */
   readonly hint: string;
@@ -83,30 +83,60 @@ function classifyStatus(status: number, code: string): ApiFailureKind {
   }
 }
 
+/**
+ * Warm motive line per failure kind, in neutral Spanish. The envelope message
+ * can arrive in English with machine tokens (`Access denied: role.denied`),
+ * so the visible motive never quotes it: codes, reasons and trace ids travel
+ * only inside the collapsed "Copiar detalle" of the panel.
+ */
+function messageFor(kind: ApiFailureKind): string {
+  switch (kind) {
+    case 'denied':
+      return 'No tiene permiso para esta operación.';
+    case 'not_found':
+      return 'No encontramos ese registro.';
+    case 'validation':
+      return 'Hay un dato por corregir.';
+    case 'conflict':
+      return 'Ese registro ya existe.';
+    case 'transport':
+      return 'No pudimos comunicarnos con el servicio.';
+    case 'server_error':
+      return 'El servicio tuvo un problema interno.';
+    case 'contract':
+      return 'La respuesta llegó incompleta.';
+    case 'untyped_server_error':
+      return 'El servicio tuvo un problema interno.';
+    default:
+      return 'Ocurrió un problema inesperado.';
+  }
+}
+
+/** What the user can do about it, in neutral Spanish and without jargon. */
 function hintFor(kind: ApiFailureKind, status: number | null): string {
   switch (kind) {
     case 'denied':
-      return 'El API mantiene la decisión: su rol no habilita esta operación. El identificador de traza permite auditarla.';
+      return 'Si necesita este acceso, pida a jefatura que revise su permiso.';
     case 'not_found':
-      return 'El registro no existe o quedó fuera del alcance de la organización. Revise el identificador.';
+      return 'Revise el dato buscado e intente de nuevo.';
     case 'validation':
-      return 'Uno de los datos enviados no cumple el contrato del API. Corrija el campo señalado y reintente.';
+      return 'Corrija el campo señalado e intente de nuevo.';
     case 'conflict':
-      return 'Ya existe un registro con esa clave de negocio. La operación no se aplicó.';
+      return 'Verifique que el registro no esté duplicado.';
     case 'transport':
-      return 'El API no se pudo alcanzar desde el proxy. Verifique que el runtime local esté en marcha.';
+      return 'Revise su conexión e intente de nuevo.';
     case 'server_error':
-      return 'El API reportó un fallo interno con su propio envelope. Reintente y, si persiste, escale con el identificador de traza.';
+      return 'Espere un momento e intente de nuevo.';
     case 'contract':
-      return 'La respuesta no cumple el contrato declarado. No se muestra el contenido para evitar datos incompletos.';
+      return 'Intente de nuevo en un momento.';
     case 'untyped_server_error':
       return status === 500
-        ? 'El API falló antes de construir su envelope. Causa habitual en el entorno local: la identidad activa no tiene fila en memberships, y la auditoría de la denegación no puede registrar el nodo de organización. La pantalla muestra un estado vacío tipificado en lugar del cuerpo del error.'
-        : 'El API respondió con un error de infraestructura. Reintente; si persiste, escale con el identificador de traza.';
+        ? 'Espere un momento e intente de nuevo.'
+        : 'Espere un momento e intente de nuevo.';
     case 'client':
       return '';
     default:
-      return 'Fallo no clasificado. Reintente y, si persiste, escale con el identificador de traza.';
+      return 'Intente de nuevo en un momento.';
   }
 }
 
@@ -126,7 +156,7 @@ export function classifyApiError(error: unknown): ApiFailure {
       code: error.code,
       reason: error.reason ?? null,
       traceId: error.traceId,
-      message: error.message,
+      message: messageFor(kind),
       hint: hintFor(kind, error.status),
     };
   }

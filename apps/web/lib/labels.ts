@@ -64,15 +64,15 @@ export const SECTION_LABELS: Record<SectionId, string> = {
   obras: 'Obras',
 };
 
-/** Name of a role code, falling back to the raw code when unknown. */
+/** Name of a role code, falling back to a generic Spanish phrase when unknown. */
 export function roleLabel(role: string | null | undefined): string {
   if (role === null || role === undefined) return 'Sin rol';
-  return ROLE_LABELS[role as RoleCode] ?? role;
+  return ROLE_LABELS[role as RoleCode] ?? 'su rol';
 }
 
-/** Name of an action code, falling back to the raw code when unknown. */
+/** Name of an action code, falling back to a generic Spanish phrase when unknown. */
 export function actionLabel(action: string): string {
-  return ACTION_LABELS[action as ActionCode] ?? action;
+  return ACTION_LABELS[action as ActionCode] ?? 'esta acción';
 }
 
 // ============ Salud catalogs ============
