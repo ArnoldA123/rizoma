@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { Alert } from '@/components/ui/alert';
 import { buttonVariants } from '@/components/ui/button';
 import { IconLock } from '@/components/ui/icons';
-import { actionLabel, roleLabel } from '@/lib/labels';
+import { actionLabel, ROLE_LABELS } from '@/lib/labels';
+import type { RoleCode } from '@/lib/access';
 import { cn } from '@/lib/utils';
 
 /**
@@ -74,10 +75,15 @@ export function DeniedNotice({
   code = 'access.denied',
   status = 403,
 }: DeniedNoticeProps) {
+  const roleName = role == null ? undefined : ROLE_LABELS[role as RoleCode];
   const motive =
-    role === null || role === undefined
-      ? 'No pudimos saber su rol, así que no podemos dejarle pasar.'
-      : `Su rol ${roleLabel(role)} no permite ${action === undefined ? 'esta acción' : actionLabel(action).toLowerCase()}.`;
+    roleName === undefined
+      ? 'No tiene permiso para esta pantalla.'
+      : `Su rol ${roleName} no permite ${action === undefined ? 'esta acción' : actionLabel(action).toLowerCase()}.`;
+  const nextStep =
+    roleName === undefined
+      ? 'Vuelva al inicio y continúe con las pantallas habilitadas.'
+      : 'Vuelva al inicio y continúe con las pantallas habilitadas para su rol.';
   const detail = `code: ${code}\nreason: ${reason}\ntraceId: ${traceId}\nstatus: ${status}`;
 
   return (
@@ -87,7 +93,7 @@ export function DeniedNotice({
       title="Sin permiso para esta pantalla"
     >
       <p>{motive}</p>
-      <p>Vuelva al inicio y continúe con las pantallas habilitadas para su rol.</p>
+      <p>{nextStep}</p>
       <p>Si necesita este acceso, avise a jefatura o a soporte.</p>
       <CopyDetail text={detail} />
       <div className="mt-3">
