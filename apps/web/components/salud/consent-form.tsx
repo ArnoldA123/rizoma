@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import {
   CONSENT_RECORD_TYPES,
   DOCUMENT_TYPES,
@@ -17,6 +17,7 @@ import {
   type RecordingMark,
 } from '@rizoma/contracts';
 import { Button } from '@/components/ui/button';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
@@ -25,6 +26,7 @@ import { FailurePanel } from '@/components/salud/states';
 import { DOCUMENT_TYPE_LABELS, recordTypeLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createConsent } from '@/lib/salud-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { cn } from '@/lib/utils';
 
 /**
@@ -41,8 +43,8 @@ import { cn } from '@/lib/utils';
  *     (never omitted) because the API rejects an empty map and treats an unmarked
  *     type as *not* authorised — the form must not rely on a default it does not
  *     control;
- *   - the two centre identifiers as UUIDs. MVP1 has no centre catalog endpoint,
- *     so the pair travels as identifiers, the same way the sede does on the
+ *   - the two centre identifiers are picked from the sede list with a
+ *     browser-side search, the same way the sede is picked on the
  *     registration form.
  */
 export interface ConsentFormProps {
@@ -72,6 +74,24 @@ export function ConsentForm({ patientId, patient, episodes, onCreated, className
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const docType: DocumentType = documentTypeSchema.catch('dni').parse(patient?.documentType);
   const checks: Readonly<Record<string, FieldCheck>> = {
@@ -133,32 +153,23 @@ export function ConsentForm({ patientId, patient, episodes, onCreated, className
           <label htmlFor="consent-episode" className="text-[0.8125rem] font-medium">
             Episodio
           </label>
-          {episodes.length === 0 ? (
-            <Input
-              id="consent-episode"
-              className="font-mono text-xs"
-              spellCheck={false}
-              placeholder="UUID del episodio"
-              value={episodeId}
-              onChange={(event) => setEpisodeId(event.target.value)}
-              {...fieldStateProps(checks.episodeId ?? null, touched)}
-            />
-          ) : (
-            <Select
-              id="consent-episode"
-              value={episodeId}
-              onChange={(event) => setEpisodeId(event.target.value)}
-              onBlur={() => setTouched(true)}
-            >
-              <option value="">Seleccione un episodio</option>
-              {episodes.map((episode) => (
+          <Select
+            id="consent-episode"
+            value={episodeId}
+            onChange={(event) => setEpisodeId(event.target.value)}
+            onBlur={() => setTouched(true)}
+          >
+            <option value="">Seleccione un episodio</option>
+            {episodes.map((episode) => {
+              const date = (episode.openedAt ?? '').slice(0, 10);
+              return (
                 <option key={episode.id} value={episode.id}>
-                  {episode.specialty} · {episode.id.slice(0, 8)}… ·{' '}
+                  {episode.specialty}{date === '' ? '' : ` · ${date}`} ·{' '}
                   {episode.status === 'open' ? 'abierto' : 'cerrado'}
                 </option>
-              ))}
-            </Select>
-          )}
+              );
+            })}
+          </Select>
           <FieldMessage issue={checks.episodeId ?? null} touched={touched} validLabel="Dato aceptado." />
         </div>
 
@@ -178,17 +189,16 @@ export function ConsentForm({ patientId, patient, episodes, onCreated, className
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label htmlFor="consent-consulting-center" className="text-[0.8125rem] font-medium">
-            Centro consultor (UUID)
-          </label>
-          <Input
-            id="consent-consulting-center"
-            className="font-mono text-xs"
-            spellCheck={false}
-            value={consultingCenter}
-            onChange={(event) => setConsultingCenter(event.target.value)}
-            onBlur={() => setTouched(true)}
-            {...fieldStateProps(checks.consultingCenter ?? null, touched)}
+          <EntitySelector
+            label="Centro consultor"
+            items={sedeItems}
+            value={consultingCenter === '' ? null : consultingCenter}
+            onChange={(id) => {
+              setConsultingCenter(id ?? '');
+              setTouched(true);
+            }}
+            placeholder="Seleccionar sede…"
+            searchPlaceholder="Buscar por nombre…"
           />
           <FieldMessage
             issue={checks.consultingCenter ?? null}
@@ -198,17 +208,16 @@ export function ConsentForm({ patientId, patient, episodes, onCreated, className
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label htmlFor="consent-consultor-center" className="text-[0.8125rem] font-medium">
-            Centro consultado (UUID)
-          </label>
-          <Input
-            id="consent-consultor-center"
-            className="font-mono text-xs"
-            spellCheck={false}
-            value={consultorCenter}
-            onChange={(event) => setConsultorCenter(event.target.value)}
-            onBlur={() => setTouched(true)}
-            {...fieldStateProps(checks.consultorCenter ?? null, touched)}
+          <EntitySelector
+            label="Centro consultado"
+            items={sedeItems}
+            value={consultorCenter === '' ? null : consultorCenter}
+            onChange={(id) => {
+              setConsultorCenter(id ?? '');
+              setTouched(true);
+            }}
+            placeholder="Seleccionar sede…"
+            searchPlaceholder="Buscar por nombre…"
           />
           <FieldMessage
             issue={checks.consultorCenter ?? null}

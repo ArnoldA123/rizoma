@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   INVOICE_STATUSES,
   invoiceListSchema,
@@ -11,6 +11,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { SkeletonRows } from '@/components/ui/skeleton';
@@ -21,9 +22,10 @@ import { InvoiceIssueForm, type InvoiceDraftSeed } from '@/components/salud/invo
 import { QuotesPanel } from '@/components/salud/quotes-panel';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { requestJson } from '@/lib/api-client';
+import { listCashSessions } from '@/lib/salud-api';
 import { withSavedView } from '@/lib/views-api';
 import { DEV_IDENTITY } from '@/lib/config';
-import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
+import { formatPen, formatUtcStamp } from '@/lib/format';
 import {
   billingDocumentTypeLabel,
   fiscalStatusLabel,
@@ -102,8 +104,31 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
   const [viewId, setViewId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [lookup, setLookup] = useState('');
   const [seed, setSeed] = useState<InvoiceDraftSeed | null>(null);
+  const [cashSessionItems, setCashSessionItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listCashSessions({}, controller.signal)
+      .then((list) => {
+        if (!active) return;
+        setCashSessionItems(
+          list.map((row) => ({
+            id: row.id,
+            label: `${(row.openedAt ?? '').slice(0, 16).replace('T', ' ')} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
+            sub: row.openedByName ?? undefined,
+          })),
+        );
+      })
+      .catch(() => {
+        if (active) setCashSessionItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   // Sede the forms prefill with: the shift this session opened, else the local
   // development value. Every form also remembers the last real row it read.
@@ -115,6 +140,15 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
   );
   const rows = invoices.data ?? [];
   const current = useMemo(() => paginate(rows, page), [rows, page]);
+
+  const invoiceItems: readonly EntityItem[] = useMemo(
+    () =>
+      rows.map((invoice) => ({
+        id: invoice.id,
+        label: `${invoice.serie}-${String(invoice.numero).padStart(8, '0')} · ${invoice.customerName}`,
+      })),
+    [rows],
+  );
 
   const selected = useMemo(
     () => rows.find((invoice) => invoice.id === selectedId) ?? null,
@@ -180,16 +214,13 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
           />
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="invoice-filter-session" className="text-[0.8125rem] font-medium">
-                Turno de caja
-              </label>
-              <Input
-                id="invoice-filter-session"
-                className="font-mono text-xs"
-                spellCheck={false}
-                placeholder="UUID del turno (vacío: todos)"
-                value={filters.cashSession}
-                onChange={(event) => updateFilters({ ...filters, cashSession: event.target.value })}
+              <EntitySelector
+                label="Turno de caja"
+                items={cashSessionItems}
+                value={filters.cashSession === '' ? null : filters.cashSession}
+                onChange={(id) => updateFilters({ ...filters, cashSession: id ?? '' })}
+                placeholder="Todos los turnos"
+                searchPlaceholder="Buscar por fecha…"
               />
             </div>
 
@@ -270,26 +301,17 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <label htmlFor="invoice-lookup" className="sr-only">
-              Identificador del comprobante
-            </label>
-            <Input
-              id="invoice-lookup"
-              className="font-mono text-xs sm:max-w-sm"
-              spellCheck={false}
-              placeholder="UUID del comprobante"
-              value={lookup}
-              onChange={(event) => setLookup(event.target.value)}
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={lookup.trim() === ''}
-              onClick={() => setSelectedId(lookup.trim())}
-            >
-              Abrir detalle
-            </Button>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-64 flex-1 sm:max-w-sm">
+              <EntitySelector
+                label="Comprobante"
+                items={invoiceItems}
+                value={selectedId}
+                onChange={(id) => setSelectedId(id)}
+                placeholder="Seleccionar comprobante…"
+                searchPlaceholder="Buscar por serie o cliente…"
+              />
+            </div>
             <Link
               href="/salud/tableros/caja"
               className={cn(buttonVariants({ variant: 'ghost', size: 'sm' }), 'ml-auto')}
@@ -312,7 +334,7 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
             <EmptyState
               eyebrow="Sin comprobantes"
               title="El alcance no tiene comprobantes con esos filtros"
-              description="Emita el primero con el formulario de arriba, limpie los filtros, o abra un comprobante existente con su identificador. El detalle muestra el par fiscal y los cobros registrados."
+              description="Emita el primero con el formulario de arriba, limpie los filtros, o abra un comprobante existente eligiéndolo de la lista. El detalle muestra el par fiscal y los cobros registrados."
             />
           ) : null}
 
@@ -325,8 +347,9 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
                 >
                   <div className="flex min-w-0 flex-col gap-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="tabular text-[0.9375rem] font-medium">
-                        {invoice.serie}-{String(invoice.numero).padStart(8, '0')}
+                      <span className="text-[0.9375rem] font-medium">
+                        {invoice.customerName} · {invoice.serie}-
+                        {String(invoice.numero).padStart(8, '0')}
                       </span>
                       <Badge variant={invoiceStatusVariant(invoice.status)}>
                         {invoiceStatusLabel(invoice.status)}
@@ -337,9 +360,10 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
                     </div>
                     <span className="tabular text-xs text-muted-foreground">
                       {billingDocumentTypeLabel(invoice.customerDocType)} {invoice.customerDocNumber} ·{' '}
-                      {invoice.customerName} · {formatPen(invoice.total)} ·{' '}
-                      {formatUtcStamp(invoice.issuedAt)} ·{' '}
-                      <span className="font-mono">{shortId(invoice.id)}</span>
+                      {formatPen(invoice.total)} · {formatUtcStamp(invoice.issuedAt)}
+                    </span>
+                    <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                      id {invoice.id}
                     </span>
                   </div>
                   <Button
@@ -384,8 +408,11 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
         <>
           {selected === null ? (
             <p className="text-xs text-muted-foreground">
-              Leyendo el comprobante <span className="font-mono">{shortId(selectedId)}</span> desde el
-              API. Si el identificador no existe en el alcance, el detalle responde 404 con su
+              Leyendo el comprobante{' '}
+              <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                {selectedId}
+              </span>{' '}
+              desde el API. Si el identificador no existe en el alcance, el detalle responde 404 con su
               envelope.
             </p>
           ) : null}

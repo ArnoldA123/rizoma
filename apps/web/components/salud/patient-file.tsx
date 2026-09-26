@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { AppointmentRecord, EpisodeRecord, PatientRecord } from '@rizoma/contracts';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -16,11 +16,33 @@ import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { IconAlertTriangle, IconArrowRight } from '@/components/ui/icons';
 import { documentTypeLabel, appointmentStatusLabel, appointmentStatusVariant, roleLabel } from '@/lib/labels';
 import { type ApiFailure } from '@/lib/salud-errors';
-import { getPatient, listAppointments, listEpisodes } from '@/lib/salud-api';
+import { getPatient, listAppointments, listEpisodes, listPatients } from '@/lib/salud-api';
+import { listUsers } from '@/lib/users-api';
 import { appointmentsOfPatient } from '@/lib/salud-select';
 import { formatUtcDate, utcDateOf, utcTimeRange } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
+
+/**
+ * Spanish labels for the `patient_files.contacts` bag. `phone` is the fixed
+ * key `PatientForm` writes; the rest are the typed custom keys a tenant may
+ * define (telefono/correo/direccion, …). Unknown keys fall back to the raw
+ * key as neutral text — the bag is never rendered as JSON.
+ */
+const CONTACT_LABELS: Readonly<Record<string, string>> = {
+  phone: 'Teléfono',
+  telefono: 'Teléfono',
+  email: 'Correo',
+  correo: 'Correo',
+  address: 'Dirección',
+  direccion: 'Dirección',
+  dirección: 'Dirección',
+};
+
+/** Spanish label of one contacts key, or the raw key when the tenant owns it. */
+function contactLabel(key: string): string {
+  return CONTACT_LABELS[key.toLowerCase()] ?? key;
+}
 
 /**
  * `/salud/pacientes/[id]` — the ficha 360.
@@ -185,12 +207,17 @@ export function PatientFile({
             </Alert>
           )}
 
-          {Object.keys(record.contacts).length === 0 ? null : (
+          {Object.entries(record.contacts).length === 0 ? null : (
             <div className="flex flex-col gap-1">
               <span className="text-[0.8125rem] font-medium">Contactos</span>
-              <span className="tabular font-mono text-xs text-muted-foreground">
-                {JSON.stringify(record.contacts)}
-              </span>
+              <ul className="flex flex-col gap-0.5">
+                {Object.entries(record.contacts).map(([key, value]) => (
+                  <li key={key} className="text-xs text-muted-foreground">
+                    <span className="font-medium text-foreground">{contactLabel(key)}:</span>{' '}
+                    {String(value)}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </CardContent>
@@ -215,6 +242,7 @@ export function PatientFile({
 
       <PatientAppointments
         patientId={record.id}
+        patientName={record.personName}
         appointments={appointments.data}
         loading={appointments.loading}
         failure={appointments.failure}
@@ -268,6 +296,7 @@ export function PatientFile({
 
 interface PatientAppointmentsProps {
   readonly patientId: string;
+  readonly patientName: string;
   readonly appointments: AppointmentRecord[] | null;
   readonly loading: boolean;
   readonly failure: ApiFailure | null;
@@ -284,14 +313,53 @@ interface PatientAppointmentsProps {
  */
 function PatientAppointments({
   patientId,
+  patientName,
   appointments,
   loading,
   failure,
   onRetry,
 }: PatientAppointmentsProps) {
   const [showAll, setShowAll] = useState(false);
+  // The appointments endpoint carries only ids, so professional and patient
+  // names resolve in the browser against the scope lists. A failed auxiliary
+  // read leaves the map empty and the row falls back to the short id.
+  const [patientNames, setPatientNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const signal = controller.signal;
+    Promise.allSettled([listPatients(signal), listUsers({}, signal)]).then(
+      ([patients, users]) => {
+        if (!active) return;
+        if (patients.status === 'fulfilled') {
+          setPatientNames(new Map(patients.value.map((row) => [row.id, row.personName])));
+        }
+        if (users.status === 'fulfilled') {
+          setUserNames(new Map(users.value.map((row) => [row.id, row.name])));
+        }
+      },
+    );
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
   const mine = appointmentsOfPatient(appointments ?? [], patientId);
   const rows = showAll ? (appointments ?? []) : mine;
+  const professionalName = useMemo(
+    () =>
+      new Map(
+        (appointments ?? []).map((appointment) => [
+          appointment.id,
+          userNames.get(appointment.professionalId) ??
+            `Profesional ${appointment.professionalId.slice(0, 8)}…`,
+        ]),
+      ),
+    [appointments, userNames],
+  );
 
   return (
     <Card>
@@ -344,7 +412,14 @@ function PatientAppointments({
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <span className="tabular text-[0.8125rem]">
                     {formatUtcDate(utcDateOf(appointment.startsAt) ?? '')} ·{' '}
-                    {utcTimeRange(appointment.startsAt, appointment.durationMin)} UTC
+                    {utcTimeRange(appointment.startsAt, appointment.durationMin)} UTC ·{' '}
+                    {appointment.patientId === patientId
+                      ? patientName
+                      : (patientNames.get(appointment.patientId) ??
+                        `Paciente ${appointment.patientId.slice(0, 8)}…`)}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {professionalName.get(appointment.id) ?? 'Profesional sin nombre en el alcance'}
                   </span>
                   <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
                     profesional {appointment.professionalId.slice(0, 8)}… · paciente{' '}

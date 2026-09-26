@@ -11,6 +11,7 @@ import {
 } from '@rizoma/contracts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
@@ -19,6 +20,7 @@ import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { EPISODE_STATUS_LABELS } from '@/lib/labels';
 import { closeEpisode, createEpisode } from '@/lib/salud-api';
+import { listUsers } from '@/lib/users-api';
 import { episodesOfPatient } from '@/lib/salud-select';
 import { formatUtcDate, utcDateOf } from '@/lib/salud-time';
 import type { Resource } from '@/lib/use-resource';
@@ -53,6 +55,29 @@ export function EpisodesPanel({ patientId, canWrite, resource, className }: Epis
   const [revertedId, setRevertedId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  // Professional names for the rows: the episodes endpoint carries only the
+  // id, so it resolves in the browser. A failed read leaves the map empty
+  // and the row falls back to the short id.
+  const [professionalNames, setProfessionalNames] = useState<ReadonlyMap<string, string>>(
+    new Map(),
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listUsers({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setProfessionalNames(new Map(rows.map((row) => [row.id, row.name])));
+      })
+      .catch(() => {
+        if (active) setProfessionalNames(new Map());
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   // The rollback flash is a one-shot animation: the flag clears itself so a
   // second failure on the same row animates again.
@@ -183,13 +208,17 @@ export function EpisodesPanel({ patientId, canWrite, resource, className }: Epis
                         {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}
                       </Badge>
                     </div>
-                    <span className="tabular font-mono text-xs text-muted-foreground">
+                    <span className="tabular text-xs text-muted-foreground">
                       abierto {formatUtcDate(utcDateOf(episode.openedAt) ?? '')}
                       {episode.closedAt === null
                         ? ' · sin cierre'
                         : ` · cerrado ${formatUtcDate(utcDateOf(episode.closedAt) ?? '')}`}
-                      {' · profesional '}
-                      {episode.professionalId.slice(0, 8)}…
+                      {' · '}
+                      {professionalNames.get(episode.professionalId) ??
+                        'Profesional sin nombre en el alcance'}
+                    </span>
+                    <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                      profesional {episode.professionalId.slice(0, 8)}…
                     </span>
                   </div>
 
@@ -225,6 +254,26 @@ function EpisodeForm({ patientId, onOpened }: EpisodeFormProps) {
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
+  const [professionalItems, setProfessionalItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listUsers({ role: 'medico' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setProfessionalItems(
+          rows.map((row) => ({ id: row.id, label: row.name, sub: row.email })),
+        );
+      })
+      .catch(() => {
+        if (active) setProfessionalItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     specialty: checkRequiredText('specialty', specialty, SPECIALTY_MAX),
@@ -282,18 +331,16 @@ function EpisodeForm({ patientId, onOpened }: EpisodeFormProps) {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label htmlFor="episode-professional" className="text-[0.8125rem] font-medium">
-            Profesional (UUID)
-          </label>
-          <Input
-            id="episode-professional"
-            className="font-mono text-xs"
-            spellCheck={false}
-            placeholder="vacío = usted mismo"
-            value={professionalId}
-            onChange={(event) => setProfessionalId(event.target.value)}
-            onBlur={() => setTouched(true)}
-            {...fieldStateProps(checks.professionalId ?? null, touched)}
+          <EntitySelector
+            label="Profesional"
+            items={professionalItems}
+            value={professionalId === '' ? null : professionalId}
+            onChange={(id) => {
+              setProfessionalId(id ?? '');
+              setTouched(true);
+            }}
+            placeholder="Vacío: usted mismo"
+            searchPlaceholder="Buscar por nombre…"
           />
           <FieldMessage
             issue={checks.professionalId ?? null}

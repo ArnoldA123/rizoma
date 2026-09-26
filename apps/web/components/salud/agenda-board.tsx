@@ -12,6 +12,9 @@ import { ViewSelector } from '@/components/views/view-selector';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { DEV_IDENTITY } from '@/lib/config';
 import { requestJson } from '@/lib/api-client';
+import { listPatients } from '@/lib/salud-api';
+import { listUsers } from '@/lib/users-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { withSavedView } from '@/lib/views-api';
 import {
   appointmentStatusLabel,
@@ -84,6 +87,37 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
   const [focusOwn, setFocusOwn] = useState(view === 'medico');
   const [formOpen, setFormOpen] = useState(view === 'recepcion');
   const [now, setNow] = useState(() => Date.now());
+  // Name lookups for the rows: the appointments endpoint carries only ids,
+  // so the board resolves them in the browser against the scope lists. A list
+  // that fails to load leaves its map empty and the row falls back to the
+  // short id — the agenda never blocks on an auxiliary read.
+  const [patientNames, setPatientNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [sedeNames, setSedeNames] = useState<ReadonlyMap<string, string>>(new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const signal = controller.signal;
+    Promise.allSettled([listPatients(signal), listUsers({}, signal), listOrgNodes({}, signal)]).then(
+      ([patients, users, sedes]) => {
+        if (!active) return;
+        if (patients.status === 'fulfilled') {
+          setPatientNames(new Map(patients.value.map((row) => [row.id, row.personName])));
+        }
+        if (users.status === 'fulfilled') {
+          setUserNames(new Map(users.value.map((row) => [row.id, row.name])));
+        }
+        if (sedes.status === 'fulfilled') {
+          setSedeNames(new Map(sedes.value.map((row) => [row.id, row.name])));
+        }
+      },
+    );
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const reload = appointments.reload;
 
@@ -258,14 +292,17 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
                     </span>
                     <span className="flex min-w-0 flex-col gap-0.5">
                       <span className="text-[0.8125rem]">
-                        {appointment.durationMin} min · paciente{' '}
-                        <span className="font-mono text-xs">
-                          {appointment.patientId.slice(0, 8)}…
-                        </span>
+                        {appointment.durationMin} min ·{' '}
+                        {patientNames.get(appointment.patientId) ?? 'Paciente sin nombre en el alcance'}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {userNames.get(appointment.professionalId) ?? 'Profesional sin nombre en el alcance'}{' '}·{' '}
+                        {sedeNames.get(appointment.orgNodeId) ?? 'Sede sin nombre en el alcance'}
                       </span>
                       <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                        profesional {appointment.professionalId.slice(0, 8)}… · sede{' '}
-                        {appointment.orgNodeId.slice(0, 8)}…
+                        cita {appointment.id.slice(0, 8)}… · pac{' '}
+                        {appointment.patientId.slice(0, 8)}… · prof{' '}
+                        {appointment.professionalId.slice(0, 8)}…
                       </span>
                     </span>
                   </div>

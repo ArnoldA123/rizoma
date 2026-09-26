@@ -444,6 +444,8 @@ export interface CashSessionRecord {
   tenantId: string;
   orgNodeId: string;
   openedBy: string;
+  /** Display name of the opener, resolved via `JOIN users` on the list reads (null on writes, which select no join). */
+  openedByName: string | null;
   openedAt: IsoValue;
   closedAt: IsoValue;
   totals: Record<string, unknown>;
@@ -515,6 +517,7 @@ function mapCashSession(row: Record<string, unknown>): CashSessionRecord {
     tenantId: readString(row.tenant_id) ?? '',
     orgNodeId: readString(row.org_node_id) ?? '',
     openedBy: readString(row.opened_by) ?? '',
+    openedByName: readString(row.opened_by_name) ?? null,
     openedAt: toIso(row.opened_at),
     closedAt: toIso(row.closed_at),
     totals: toJsonObject(row.totals),
@@ -1132,6 +1135,149 @@ export async function listInvoices(
   // emitting a cursor that the next call would reject.
   if (last === undefined || last.createdAt === null) return { rows: page, nextCursor: null };
   return { rows: page, nextCursor: encodePageCursor({ createdAt: last.createdAt, id: last.id }) };
+}
+
+/** Filters of `GET /v1/billing/cash-sessions`: status, sede and opening window. */
+export interface CashSessionListFilters {
+  readonly status: string | null;
+  readonly orgNodeId: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+}
+
+const CASH_SESSION_LIST_STATUSES = ['open', 'closed'] as const;
+
+/**
+ * Parses the query of `GET /v1/billing/cash-sessions`. Every filter is optional
+ * and an empty string counts as absent; a malformed UUID, an unknown status or
+ * an unparsable date is a 400, never a silently ignored filter.
+ */
+export function parseCashSessionListFilters(query: unknown, traceId: string): CashSessionListFilters {
+  const record = asRecord(query);
+  const rawStatus = readOptionalFilter(record.status);
+  if (rawStatus !== null && !(CASH_SESSION_LIST_STATUSES as readonly string[]).includes(rawStatus)) {
+    throw billingError(BILLING_ERROR.invalidParam, `Invalid status: ${rawStatus}`, 400, traceId);
+  }
+  const rawNode = readOptionalFilter(record.orgNodeId ?? record.org_node_id);
+  if (rawNode !== null && !UUID_RE.test(rawNode)) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid orgNodeId: expected a UUID', 400, traceId);
+  }
+  const rawFrom = readOptionalFilter(record.from);
+  if (rawFrom !== null && Number.isNaN(Date.parse(rawFrom))) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid from: expected a date', 400, traceId);
+  }
+  const rawTo = readOptionalFilter(record.to);
+  if (rawTo !== null && Number.isNaN(Date.parse(rawTo))) {
+    throw billingError(BILLING_ERROR.invalidParam, 'Invalid to: expected a date', 400, traceId);
+  }
+  return { status: rawStatus, orgNodeId: rawNode, from: rawFrom, to: rawTo };
+}
+
+/**
+ * Cash shifts inside the membership subtree, newest first, capped at
+ * `BILLING_LIST_LIMIT`. Same read contract as `listInvoices`: the guard
+ * (`invoice.issue`, the only billing grant the demo matrix declares) owns the
+ * denial audit and a successful read writes no audit row — reads are not
+ * writes (§4.4). The opener name rides along via `JOIN users`, so the screen
+ * renders a name instead of a UUID.
+ *
+ * Keyset pagination (R1): without `?cursor=`/`?limit=` the legacy bare array
+ * (cap 200) is returned unchanged. With either, the `{rows, nextCursor}`
+ * page is returned instead, ordered by the stable `opened_at DESC, id DESC`
+ * (the legacy `ORDER BY opened_at DESC` plus the `id` tiebreaker;
+ * `opened_at` is NOT NULL per `003_salud.sql`). The cursor is the opaque
+ * base64url of the last row's `{openedAt, id}`; the query fetches
+ * `limit + 1` rows and a non-null `nextCursor` means there is another page.
+ * Every filter ANDs with the keyset predicate, so a filtered walk stays
+ * inside the filter.
+ */
+export async function listCashSessions(
+  actor: ActorContext,
+  query: unknown,
+): Promise<CashSessionRecord[] | BillingPage<CashSessionRecord>> {
+  const filters = parseCashSessionListFilters(query, actor.traceId);
+  const record = asRecord(query);
+  const rawCursor = readPageParam(record.cursor);
+  const rawLimit = readPageParam(record.limit);
+  const paged = rawCursor !== null || rawLimit !== null;
+  const limit = parsePageLimit(rawLimit, actor.traceId);
+  let cursorOpenedAt: string | null = null;
+  let cursorId: string | null = null;
+  if (rawCursor !== null) {
+    const payload = decodePageCursor(rawCursor, actor.traceId);
+    cursorOpenedAt = payload.openedAt ?? null;
+    cursorId = payload.id ?? null;
+    if (cursorOpenedAt === null || cursorId === null) {
+      throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, actor.traceId);
+    }
+    if (Number.isNaN(Date.parse(cursorOpenedAt))) {
+      throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, actor.traceId);
+    }
+    if (!UUID_RE.test(cursorId)) {
+      throw billingError(BILLING_ERROR.invalidParam, 'Invalid pagination cursor', 400, actor.traceId);
+    }
+  }
+  const facts = await loadFacts(actor);
+  await authorize(actor, facts, {
+    entity: 'cash_session',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'cash_session.list',
+  });
+  const conditions = ['c.tenant_id = $1', 'c.org_node_id = ANY($2::uuid[])'];
+  const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  if (filters.status !== null) {
+    values.push(filters.status);
+    conditions.push(`c.status = $${values.length}`);
+  }
+  if (filters.orgNodeId !== null) {
+    values.push(filters.orgNodeId);
+    conditions.push(`c.org_node_id = $${values.length}::uuid`);
+  }
+  if (filters.from !== null) {
+    values.push(filters.from);
+    conditions.push(`c.opened_at >= $${values.length}::timestamptz`);
+  }
+  if (filters.to !== null) {
+    values.push(filters.to);
+    conditions.push(`c.opened_at <= $${values.length}::timestamptz`);
+  }
+  if (cursorOpenedAt !== null && cursorId !== null) {
+    values.push(cursorOpenedAt, cursorId);
+    const openedAtParam = values.length - 1;
+    const idParam = values.length;
+    conditions.push(
+      `(c.opened_at < $${openedAtParam}::timestamptz OR ` +
+        `(c.opened_at = $${openedAtParam}::timestamptz AND c.id < $${idParam}::uuid))`,
+    );
+  }
+  const from = 'FROM cash_sessions c LEFT JOIN users u ON u.id = c.opened_by AND u.tenant_id = c.tenant_id';
+  const columns =
+    'c.id, c.tenant_id, c.org_node_id, c.opened_by, u.name AS opened_by_name, ' +
+    'c.opened_at, c.closed_at, c.totals, c.status';
+  if (!paged) {
+    const result = await actor.client.query(
+      `SELECT ${columns} ${from} ` +
+        `WHERE ${conditions.join(' AND ')} ` +
+        `ORDER BY c.opened_at DESC LIMIT ${BILLING_LIST_LIMIT}`,
+      values,
+    );
+    return readRows(result).map(mapCashSession);
+  }
+  const result = await actor.client.query(
+    `SELECT ${columns} ${from} ` +
+      `WHERE ${conditions.join(' AND ')} ` +
+      `ORDER BY c.opened_at DESC, c.id DESC LIMIT ${limit + 1}`,
+    values,
+  );
+  const rows = readRows(result).map(mapCashSession);
+  if (rows.length <= limit) return { rows, nextCursor: null };
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  // `opened_at` is NOT NULL, so the null branch is defensive only: without
+  // an ordering key there is no cursor to offer, and ending here beats
+  // emitting a cursor that the next call would reject.
+  if (last === undefined || last.openedAt === null) return { rows: page, nextCursor: null };
+  return { rows: page, nextCursor: encodePageCursor({ openedAt: last.openedAt, id: last.id }) };
 }
 
 /** Quotes inside the membership subtree. */

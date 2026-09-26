@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import {
   SITE_CLIENT_NAME_MAX,
   SITE_CODE_MAX,
@@ -16,6 +16,7 @@ import {
   type SiteStatus,
 } from '@rizoma/contracts';
 import { CharCounter, FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -23,14 +24,15 @@ import { Select } from '@/components/ui/select';
 import { WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createSite } from '@/lib/obras-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { SITE_STATUS_LABELS } from '@/lib/labels';
 
 /**
  * Site registration form (`site.write`, gerente only).
  *
  * The checks are the `@rizoma/contracts` field validators, i.e. the same rules
- * the API service applies on arrival: a non-empty code, name and client, a UUID
- * sede and an optional non-negative budget. `budgetTotal` and `status` are
+ * the API service applies on arrival: a non-empty code, name and client, a sede
+ * picked from the scope list and an optional non-negative budget. `budgetTotal` and `status` are
  * *optional* on purpose — the service defaults them to `0` and `planned`, so the
  * form refuses nothing the endpoint would accept.
  *
@@ -73,6 +75,24 @@ export function SiteForm({ defaultOrgNodeId, onCreated, className }: SiteFormPro
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = useMemo(
     () => ({
@@ -145,24 +165,21 @@ export function SiteForm({ defaultOrgNodeId, onCreated, className }: SiteFormPro
 
       <CardContent>
         <form className="flex flex-col gap-5" onSubmit={handleSubmit} noValidate>
-          <LiveField
-            id="site-org-node"
-            label="Sede (nodo de organización)"
-            hint="UUID del nodo. El API comprueba que esté dentro del subárbol de su membresía."
-            issue={checks.orgNodeId ?? null}
-            touched={show('orgNodeId')}
-          >
-            <Input
-              id="site-org-node"
-              name="orgNodeId"
-              className="font-mono text-xs"
-              spellCheck={false}
-              value={draft.orgNodeId}
-              onChange={(event) => set('orgNodeId', event.target.value)}
-              onBlur={() => touch('orgNodeId')}
-              {...fieldStateProps(checks.orgNodeId ?? null, show('orgNodeId'))}
+          <div className="flex flex-col gap-1.5">
+            <EntitySelector
+              label="Sede"
+              items={sedeItems}
+              value={draft.orgNodeId === '' ? null : draft.orgNodeId}
+              onChange={(id) => {
+                set('orgNodeId', id ?? '');
+                touch('orgNodeId');
+              }}
+              placeholder="Seleccionar sede…"
+              searchPlaceholder="Buscar por nombre…"
             />
-          </LiveField>
+            <FieldMessage issue={checks.orgNodeId ?? null} touched={show('orgNodeId')} validLabel="Sede aceptada." />
+            <p className="text-xs text-muted-foreground">El API comprueba que esté dentro del subárbol de su membresía.</p>
+          </div>
 
           <div className="grid gap-5 sm:grid-cols-2">
             <LiveField

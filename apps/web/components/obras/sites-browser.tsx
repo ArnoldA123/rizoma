@@ -156,6 +156,9 @@ export function SitesBrowser({ role, canWrite, defaultOrgNodeId }: SitesBrowserP
                         {row.clientName} · presupuesto {formatPen(row.budgetTotal)} · inicio{' '}
                         {row.startedAt === null ? 'sin fecha' : formatUtcDate(row.startedAt.slice(0, 10))}
                       </span>
+                      <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                        obra {row.id.slice(0, 8)}…
+                      </span>
                     </div>
                     <Link
                       href={`/obras/${row.id}`}

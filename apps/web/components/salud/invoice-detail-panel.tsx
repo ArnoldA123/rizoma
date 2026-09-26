@@ -20,7 +20,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { FailurePanel, WriteResult } from '@/components/salud/states';
-import { formatPen, formatRate, formatUtcStamp, shortId } from '@/lib/format';
+import { formatPen, formatRate, formatUtcStamp } from '@/lib/format';
 import {
   billingDocumentTypeLabel,
   fiscalStatusLabel,
@@ -31,7 +31,7 @@ import {
   PAYMENT_STATUS_LABELS,
 } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { getInvoice, payInvoice, voidInvoice } from '@/lib/salud-api';
+import { getInvoice, listCashSessions, listQuotes, payInvoice, voidInvoice } from '@/lib/salud-api';
 import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
 
@@ -71,6 +71,46 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
   const [reverted, setReverted] = useState(false);
   const [pendingPayment, setPendingPayment] = useState<{ method: string; amount: number } | null>(null);
   const [pendingVoid, setPendingVoid] = useState(false);
+  // Turno y cotización por fecha/estado y cliente: los ids del comprobante se
+  // resuelven en el navegador contra las listas del alcance. Sin lectura
+  // auxiliar, la fila muestra el id corto.
+  const [sessionLabels, setSessionLabels] = useState<ReadonlyMap<string, string>>(new Map());
+  const [quoteLabels, setQuoteLabels] = useState<ReadonlyMap<string, string>>(new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const signal = controller.signal;
+    Promise.allSettled([listCashSessions({}, signal), listQuotes(signal)]).then(
+      ([sessions, quotes]) => {
+        if (!active) return;
+        if (sessions.status === 'fulfilled') {
+          setSessionLabels(
+            new Map(
+              sessions.value.map((row) => [
+                row.id,
+                `${formatUtcStamp(row.openedAt)} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
+              ]),
+            ),
+          );
+        }
+        if (quotes.status === 'fulfilled') {
+          setQuoteLabels(
+            new Map(
+              quotes.value.map((row) => [
+                row.id,
+                `${row.customerName} · ${formatPen(row.total)} · ${formatUtcStamp(row.createdAt)}`,
+              ]),
+            ),
+          );
+        }
+      },
+    );
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (!reverted) return;
@@ -183,7 +223,10 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
           </Badge>
           <span className="tabular text-xs text-muted-foreground">
             {billingDocumentTypeLabel(invoice.customerDocType)} {invoice.customerDocNumber} ·{' '}
-            {invoice.customerName}
+            {invoice.customerName} · {formatPen(invoice.total)} · {formatUtcStamp(invoice.issuedAt)}
+          </span>
+          <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+            id {invoice.id}
           </span>
           <Button
             variant="ghost"
@@ -202,10 +245,31 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
           <AmountRow label="Total" value={formatPen(invoice.total)} strong />
           <AmountRow label="Saldo pendiente" value={formatPen(pending)} strong />
           <AmountRow label="Emitido" value={formatUtcStamp(invoice.issuedAt)} />
-          <AmountRow label="Turno de caja" value={invoice.cashSessionId === null ? '—' : shortId(invoice.cashSessionId)} />
-          <AmountRow label="Cotización de origen" value={invoice.quoteId === null ? '—' : shortId(invoice.quoteId)} />
+          <AmountRow
+            label="Turno de caja"
+            value={
+              invoice.cashSessionId === null
+                ? '—'
+                : (sessionLabels.get(invoice.cashSessionId) ?? invoice.cashSessionId.slice(0, 8) + '…')
+            }
+          />
+          <AmountRow
+            label="Cotización de origen"
+            value={
+              invoice.quoteId === null
+                ? '—'
+                : (quoteLabels.get(invoice.quoteId) ?? invoice.quoteId.slice(0, 8) + '…')
+            }
+          />
           <AmountRow label="Adaptador fiscal" value={invoice.fiscalAdapter} />
         </dl>
+
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer underline underline-offset-2">Copiar detalle</summary>
+          <pre className="tabular mt-2 overflow-x-auto rounded-md border border-border bg-secondary p-2 font-mono break-all whitespace-pre-wrap">
+            {`comprobante: ${invoice.serie}-${String(invoice.numero).padStart(8, '0')}\nid: ${invoice.id}\nturno: ${invoice.cashSessionId ?? '—'}\ncotizacion: ${invoice.quoteId ?? '—'}`}
+          </pre>
+        </details>
 
         <div className="flex flex-col gap-2">
           <span className="text-[0.8125rem] font-medium">Payload fiscal</span>

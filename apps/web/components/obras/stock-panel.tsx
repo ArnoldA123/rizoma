@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
   ITEM_NAME_MAX,
   ITEM_SKU_MAX,
@@ -21,7 +21,8 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
-import { LiveField } from '@/components/ui/field-feedback';
+import { LiveField, FieldMessage } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -36,6 +37,7 @@ import {
   postStockMove,
   reverseStockMove,
 } from '@/lib/obras-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { useResource } from '@/lib/use-resource';
 
 /**
@@ -112,6 +114,35 @@ export function StockPanel({
   );
   const catalogueRows = catalogue.data ?? [];
   const ledgerRows = ledger.data ?? [];
+  /** Scope options of the move form: catalogue names, never identifiers. */
+  const itemOptions: readonly EntityItem[] = useMemo(
+    () => catalogueRows.map((row) => ({ id: row.id, label: row.name, sub: row.sku })),
+    [catalogueRows],
+  );
+  const [nodeItems, setNodeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setNodeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setNodeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+  // Item names resolve against the catalogue already loaded: the moves
+  // endpoint carries only item ids. A missing row falls back to the short id.
+  const itemNames = useMemo(
+    () => new Map(catalogueRows.map((row) => [row.id, `${row.name} · ${row.sku}`])),
+    [catalogueRows],
+  );
   /** Moves of the picked item first, so the board shortcut reads as a filter. */
   const orderedMoves = useMemo(() => {
     if (itemId === '') return ledgerRows;
@@ -329,45 +360,37 @@ export function StockPanel({
             noValidate
           >
             <div className="grid gap-4 sm:grid-cols-3">
-              <LiveField
-                id="move-item"
-                label="Ítem (UUID)"
-                issue={moveChecks.itemId ?? null}
-                touched={show('itemId') || itemId !== ''}
-                hint="Se completa al elegir una fila de la tabla o un ítem del stock crítico del tablero."
-              >
-                <Input
-                  id="move-item"
-                  className="font-mono text-xs"
-                  spellCheck={false}
-                  placeholder="UUID del ítem"
-                  value={itemId}
-                  onChange={(event) => {
-                    onItemIdChange(event.target.value);
+              <div className="flex flex-col gap-1.5">
+                <EntitySelector
+                  label="Ítem"
+                  items={itemOptions}
+                  value={itemId === '' ? null : itemId}
+                  onChange={(id) => {
+                    onItemIdChange(id ?? '');
+                    touch('itemId');
                     setSuccess(null);
                   }}
-                  onBlur={() => touch('itemId')}
+                  placeholder="Seleccionar ítem…"
+                  searchPlaceholder="Buscar por nombre…"
                 />
-              </LiveField>
-              <LiveField
-                id="move-warehouse"
-                label="Almacén (nodo de organización)"
-                issue={moveChecks.warehouseNodeId ?? null}
-                touched={show('warehouseNodeId')}
-                hint="Nodo donde se contabiliza el movimiento; el guard corre allí."
-              >
-                <Input
-                  id="move-warehouse"
-                  className="font-mono text-xs"
-                  spellCheck={false}
-                  placeholder="UUID del nodo"
-                  value={move.warehouseNodeId}
-                  onChange={(event) =>
-                    setMove((current) => ({ ...current, warehouseNodeId: event.target.value }))
-                  }
-                  onBlur={() => touch('warehouseNodeId')}
+                <FieldMessage issue={moveChecks.itemId ?? null} touched={show('itemId') || itemId !== ''} validLabel="Dato aceptado." />
+                <p className="text-xs text-muted-foreground">Se completa al elegir una fila de la tabla o un ítem del stock crítico del tablero.</p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <EntitySelector
+                  label="Almacén"
+                  items={nodeItems}
+                  value={move.warehouseNodeId === '' ? null : move.warehouseNodeId}
+                  onChange={(id) => {
+                    setMove((current) => ({ ...current, warehouseNodeId: id ?? '' }));
+                    touch('warehouseNodeId');
+                  }}
+                  placeholder="Seleccionar almacén…"
+                  searchPlaceholder="Buscar por nombre…"
                 />
-              </LiveField>
+                <FieldMessage issue={moveChecks.warehouseNodeId ?? null} touched={show('warehouseNodeId')} validLabel="Dato aceptado." />
+                <p className="text-xs text-muted-foreground">Nodo donde se contabiliza el movimiento; el guard corre allí.</p>
+              </div>
               <div className="grid grid-cols-2 gap-4">
                 <LiveField id="move-kind" label="Tipo" issue={null} touched={false}>
                   <Select
@@ -465,15 +488,15 @@ export function StockPanel({
                 >
                   <div className="flex min-w-0 flex-col gap-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="tabular text-[0.8125rem] font-medium">{row.sku}</span>
-                      <span className="text-xs text-muted-foreground">{row.name}</span>
+                      <span className="tabular text-[0.8125rem] font-medium">{row.name}</span>
+                      <span className="tabular font-mono text-xs text-muted-foreground">{row.sku}</span>
                       {itemId === row.id ? <Badge variant="outline">elegido</Badge> : null}
                     </div>
                     <span className="tabular text-xs text-muted-foreground">
                       mínimo {formatQuantity(row.minStock)} {row.unit}
                     </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                      ítem {row.id}
+                      ítem {row.id.slice(0, 8)}…
                     </span>
                   </div>
                   <Button
@@ -545,9 +568,12 @@ export function StockPanel({
                       </span>
                       {row.siteId === siteId ? <Badge variant="outline">esta obra</Badge> : null}
                     </div>
+                    <span className="text-xs text-muted-foreground">
+                      {itemNames.get(row.itemId) ?? `Ítem ${row.itemId.slice(0, 8)}…`}
+                    </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                      movimiento {row.id} · ítem {row.itemId}
-                      {row.siteId === null ? '' : ` · obra ${row.siteId}`} · {formatUtcStamp(row.at)}
+                      movimiento {row.id.slice(0, 8)}… · ítem {row.itemId.slice(0, 8)}…
+                      {row.siteId === null ? '' : ` · obra ${row.siteId.slice(0, 8)}…`} · {formatUtcStamp(row.at)}
                     </span>
                   </div>
                   {canConsume && stockMoveCanBeReversed(row) ? (

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import {
   BILLING_DESCRIPTION_MAX,
   checkRequiredText,
@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { FieldMessage, SavedPulse, fieldStateProps } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { SkeletonRows } from '@/components/ui/skeleton';
 import {
@@ -23,10 +24,11 @@ import {
   type BillingLineDraft,
 } from '@/components/salud/billing-lines-field';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states';
-import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
+import { formatPen, formatUtcStamp } from '@/lib/format';
 import { quoteStatusLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createQuote, listQuotes } from '@/lib/salud-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { PAGE_SIZE, paginate } from '@/lib/salud-select';
 import { useResource } from '@/lib/use-resource';
 import type { InvoiceDraftSeed } from '@/components/salud/invoice-issue-form';
@@ -139,8 +141,10 @@ export function QuotesPanel({ defaultOrgNodeId, onIssueFromQuote, className }: Q
                   </div>
                   <span className="tabular text-xs text-muted-foreground">
                     {formatPen(quote.total)} · {quote.items.length} línea
-                    {quote.items.length === 1 ? '' : 's'} · {formatUtcStamp(quote.createdAt)} ·{' '}
-                    <span className="font-mono">{shortId(quote.id)}</span>
+                    {quote.items.length === 1 ? '' : 's'} · {formatUtcStamp(quote.createdAt)}
+                  </span>
+                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                    id {quote.id}
                   </span>
                 </div>
 
@@ -221,6 +225,24 @@ function QuoteForm({ defaultOrgNodeId, onCreated, onClose }: QuoteFormProps) {
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [created, setCreated] = useState<QuoteRecord | null>(null);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     orgNodeId: checkUuidField('orgNodeId', orgNodeId),
@@ -280,18 +302,16 @@ function QuoteForm({ defaultOrgNodeId, onCreated, onClose }: QuoteFormProps) {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label htmlFor="quote-org-node" className="text-[0.8125rem] font-medium">
-            Sede (UUID)
-          </label>
-          <Input
-            id="quote-org-node"
-            className="font-mono text-xs"
-            spellCheck={false}
-            value={orgNodeId}
-            disabled={saving}
-            onChange={(event) => setOrgNodeId(event.target.value)}
-            onBlur={() => setTouched(true)}
-            {...fieldStateProps(checks.orgNodeId ?? null, touched)}
+          <EntitySelector
+            label="Sede"
+            items={sedeItems}
+            value={orgNodeId === '' ? null : orgNodeId}
+            onChange={(id) => {
+              setOrgNodeId(id ?? '');
+              setTouched(true);
+            }}
+            placeholder="Seleccionar sede…"
+            searchPlaceholder="Buscar por nombre…"
           />
           <FieldMessage issue={checks.orgNodeId ?? null} touched={touched} />
         </div>
@@ -317,7 +337,7 @@ function QuoteForm({ defaultOrgNodeId, onCreated, onClose }: QuoteFormProps) {
         success={
           created === null
             ? null
-            : `Cotización ${shortId(created.id)} registrada por ${formatPen(created.total)}.`
+            : `Cotización de ${created.customerName} registrada por ${formatPen(created.total)}.`
         }
       />
     </form>

@@ -39,8 +39,10 @@ import {
   attendanceQueryString,
   attendanceRecordSchema,
   budgetLineCreateInputSchema,
+  budgetLineListSchema,
   budgetLineRecordSchema,
   companyBoardSchema,
+  crewListSchema,
   importJobRecordSchema,
   inventoryItemListSchema,
   inventoryItemRecordSchema,
@@ -76,8 +78,12 @@ import {
   type AttendanceQuery,
   type AttendanceRecord,
   type BudgetLineCreateInput,
+  type BudgetLineListQuery,
   type BudgetLineRecord,
+  type BudgetLineWithItem,
   type CompanyBoard,
+  type CrewListQuery,
+  type CrewRecord,
   type ImportJobRecord,
   type InventoryItemRecord,
   type ItemCreateInput,
@@ -200,6 +206,29 @@ export function closeAssignment(siteId: string, userId: string): Promise<Assignm
     {},
     assignmentRecordSchema,
   );
+}
+
+// ============ crews ============
+
+/** Filters of `GET /v1/obras/crews` — the query fields the screen may set. */
+export interface ListCrewsQuery extends CrewListQuery {}
+
+/**
+ * `GET /v1/obras/crews` — crews inside the membership subtree, alphabetical
+ * by name, capped at 200 rows. Every filter is optional; an unset filter is
+ * omitted from the query. The screen renders `name` and keeps `id` as the
+ * option value: the identifier never reaches the visible label.
+ */
+export function listCrews(query: ListCrewsQuery = {}, signal?: AbortSignal): Promise<CrewRecord[]> {
+  const params = new URLSearchParams();
+  if (query.orgNodeId !== undefined && query.orgNodeId !== null && query.orgNodeId !== '') {
+    params.set('orgNodeId', query.orgNodeId);
+  }
+  if (query.active !== undefined && query.active !== null) {
+    params.set('active', query.active ? 'true' : 'false');
+  }
+  const suffix = params.size === 0 ? '' : `?${params.toString()}`;
+  return readList(`${BASE}/crews${suffix}`, crewListSchema, signal);
 }
 
 // ============ attendance ============
@@ -381,6 +410,28 @@ export function reverseStockMove(moveId: string): Promise<StockMoveRecord> {
 export function createBudgetLine(input: BudgetLineCreateInput): Promise<BudgetLineRecord> {
   const body = budgetLineCreateInputSchema.parse(input);
   return postJson(`${BASE}/progress/budget-lines`, body, budgetLineRecordSchema);
+}
+
+/**
+ * `GET /v1/obras/progress/budget-lines?site=` — budget lines of one site
+ * (`site.read`), alphabetical by description, capped at 200 rows.
+ *
+ * The site rides in the path query (`?site=`); only the activation flag is a
+ * filter and it is omitted when unset. Label rule (the screen owns the text,
+ * the id owns the value): the option shows the description plus the catalogue
+ * item name — never the line id.
+ */
+export function listBudgetLines(
+  siteId: string,
+  query: BudgetLineListQuery = {},
+  signal?: AbortSignal,
+): Promise<BudgetLineWithItem[]> {
+  const params = new URLSearchParams();
+  params.set('site', siteId);
+  if (query.active !== undefined && query.active !== null) {
+    params.set('active', query.active ? 'true' : 'false');
+  }
+  return readList(`${BASE}/progress/budget-lines?${params.toString()}`, budgetLineListSchema, signal);
 }
 
 /**

@@ -19,12 +19,14 @@ import {
 } from '@rizoma/contracts';
 import { requestJson } from '@/lib/api-client';
 import { CharCounter, FieldMessage, SavedPulse, fieldStateProps } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { FailurePanel } from '@/components/salud/states';
 import { createPatient } from '@/lib/salud-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { DOCUMENT_TYPE_LABELS, documentTypeLabel, roleLabel } from '@/lib/labels';
 import { cn } from '@/lib/utils';
@@ -41,9 +43,8 @@ import { cn } from '@/lib/utils';
  *   - the success state is part of the interface, not an assumption: the panel
  *     says the file was registered and, when the role cannot open the ficha, it
  *     says that too instead of offering a link that would 403;
- *   - the `orgNodeId` is an explicit field. MVP1 exposes no org-node listing
- *     endpoint (see `DEV_IDENTITY.orgNodeId`), so the sede travels as an
- *     identifier and the API keeps deciding on its own membership.
+ *   - the `orgNodeId` is picked from the sede list with a browser-side search.
+ *     The id travels as the option value and only the sede name is visible.
  */
 export interface PatientFormProps {
   /** Sede the file will be registered under; prefilled, still editable. */
@@ -165,6 +166,24 @@ export function PatientForm({
   // A failed read degrades to no section — the API still enforces on arrival.
   const [customDefs, setCustomDefs] = useState<readonly CustomFieldDef[]>([]);
   const [customValues, setCustomValues] = useState<Readonly<Record<string, string>>>({});
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -265,7 +284,8 @@ export function PatientForm({
         <CardTitle as="h2">Registrar una ficha de paciente</CardTitle>
         <CardDescription>
           La validación se ejecuta mientras escribe y replica el contrato del API: catálogo de
-          documento, DNI de 8 dígitos, fecha real en formato AAAA-MM-DD e identificadores UUID. El
+          documento, DNI de 8 dígitos, fecha real en formato AAAA-MM-DD y la sede elegida de la
+          lista. El
           envío se firma con un <code className="font-mono text-xs">Idempotency-Key</code> propio de
           cada intención.
         </CardDescription>
@@ -467,26 +487,20 @@ export function PatientForm({
               </fieldset>
             )}
 
-            <LiveField
-              id="patient-org-node"
-              label="Sede (orgNodeId)"
-              hint="MVP1 no expone un listado de nodos: la sede viaja como identificador."
-              issue={checks.orgNodeId ?? null}
-              touched={show('orgNodeId')}
-              className="sm:col-span-2"
-            >
-              <Input
-                id="patient-org-node"
-                name="orgNodeId"
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono text-xs"
-                value={draft.orgNodeId}
-                onChange={(event) => set('orgNodeId', event.target.value)}
-                onBlur={() => touch('orgNodeId')}
-                {...fieldStateProps(checks.orgNodeId ?? null, show('orgNodeId'))}
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <EntitySelector
+                label="Sede"
+                items={sedeItems}
+                value={draft.orgNodeId === '' ? null : draft.orgNodeId}
+                onChange={(id) => {
+                  set('orgNodeId', id ?? '');
+                  touch('orgNodeId');
+                }}
+                placeholder="Seleccionar sede…"
+                searchPlaceholder="Buscar por nombre…"
               />
-            </LiveField>
+              <FieldMessage issue={checks.orgNodeId ?? null} touched={show('orgNodeId')} validLabel="Dato aceptado." />
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

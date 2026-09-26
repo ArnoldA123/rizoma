@@ -14,6 +14,7 @@
 // random per-click key could not do.
 import { z } from 'zod';
 import { isoValueSchema, uuidSchema } from './common.ts';
+import { pagedListSchema, paginationQuerySchema } from './pagination.ts';
 
 /** `import_jobs.kind` of the patients importer (§5.4). */
 export const IMPORT_JOB_KIND_PATIENT_FILES_CSV = 'patient_files_csv';
@@ -144,3 +145,44 @@ export type ImportJobRecord = z.infer<typeof importJobRecordSchema>;
 export function importJobIsClean(job: Pick<ImportJobRecord, 'rowsError'>): boolean {
   return job.rowsError === 0;
 }
+
+/**
+ * One import job as the `GET /v1/imports/jobs` listing exposes it: identity,
+ * kind, outcome and counters. The source digests and the errors CSV stay on
+ * the detail route (`GET .../imports/:id`), so a wide scan never drags the
+ * file payloads along.
+ */
+export const importJobListItemSchema = importJobRecordSchema.pick({
+  id: true,
+  kind: true,
+  status: true,
+  rowsOk: true,
+  rowsError: true,
+  createdAt: true,
+});
+export type ImportJobListItem = z.infer<typeof importJobListItemSchema>;
+
+/**
+ * `GET /v1/imports/jobs` — bare array capped at 200 (legacy path, no cursor),
+ * newest first.
+ */
+export const importJobListSchema = z.array(importJobListItemSchema);
+export type ImportJobList = z.infer<typeof importJobListSchema>;
+
+/**
+ * Query filters of `GET /v1/imports/jobs`, field-for-field what the service
+ * parser (`parseImportJobListFilters` in `imports.service.ts`) accepts.
+ */
+export const importJobListQuerySchema = z.object({
+  kind: z.string().nullable().optional(),
+  status: z.string().nullable().optional(),
+});
+export type ImportJobListQuery = z.infer<typeof importJobListQuerySchema>;
+
+/** Keyset query (`?cursor=` / `?limit=`) shared with every R1 listing. */
+export const importJobPageQuerySchema = paginationQuerySchema;
+export type ImportJobPageQuery = z.infer<typeof importJobPageQuerySchema>;
+
+/** Keyset page of `GET /v1/imports/jobs` (`{rows, nextCursor}`). */
+export const importJobPagedSchema = pagedListSchema(importJobListItemSchema);
+export type ImportJobPaged = z.infer<typeof importJobPagedSchema>;

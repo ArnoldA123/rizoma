@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
   BUDGET_LINE_DESCRIPTION_MAX,
   MILESTONE_NAME_MAX,
@@ -15,13 +15,14 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
-import { LiveField } from '@/components/ui/field-feedback';
+import { LiveField, FieldMessage } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { formatQuantity, formatUtcStamp } from '@/lib/format';
-import { createBudgetLine, createMilestone, listProgressEntries, postProgressEntry } from '@/lib/obras-api';
+import { createBudgetLine, createMilestone, listBudgetLines, listInventoryItems, listProgressEntries, postProgressEntry } from '@/lib/obras-api';
 import { dateTimeLocalToUtcIso } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 
@@ -98,6 +99,48 @@ export function ProgressPanel({
     listProgressEntries({ site: siteId }, signal),
   );
   const rows = entries.data ?? [];
+  const [itemOptions, setItemOptions] = useState<readonly EntityItem[]>([]);
+  const [lineOptions, setLineOptions] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listInventoryItems(controller.signal)
+      .then((items) => {
+        if (!active) return;
+        setItemOptions(items.map((row) => ({ id: row.id, label: row.name, sub: row.sku })));
+      })
+      .catch(() => {
+        if (active) setItemOptions([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listBudgetLines(siteId, {}, controller.signal)
+      .then((lines) => {
+        if (!active) return;
+        setLineOptions(
+          lines.map((row) => ({
+            id: row.id,
+            label: row.description,
+            sub: row.itemName ?? undefined,
+          })),
+        );
+      })
+      .catch(() => {
+        if (active) setLineOptions([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [siteId]);
 
   const lineChecks: Readonly<Record<string, FieldCheck>> = useMemo(
     () => ({
@@ -114,6 +157,13 @@ export function ProgressPanel({
       qtyDone: checkNumberField('qtyDone', entry.qtyDone),
     }),
     [entry],
+  );
+  // Budget line descriptions resolve against the list already loaded: the
+  // entries endpoint carries only the line id. Missing rows fall back to the
+  // short id.
+  const lineNames = useMemo(
+    () => new Map(lineOptions.map((item) => [item.id, item.label])),
+    [lineOptions],
   );
   const milestoneChecks: Readonly<Record<string, FieldCheck>> = useMemo(
     () => ({
@@ -186,7 +236,7 @@ export function ProgressPanel({
       setTouched({});
       setSubmitted(false);
       setSuccess(
-        `Partida de ${formatQuantity(created.qtyDone)} registrada como «${created.status}» (${formatUtcStamp(created.at)}). El autor se toma del token, no del formulario: reported_by es ${created.reportedBy}.`,
+        `Partida de ${formatQuantity(created.qtyDone)} registrada como «${created.status}» (${formatUtcStamp(created.at)}). El autor se toma del token, no del formulario.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -251,23 +301,21 @@ export function ProgressPanel({
                   onBlur={() => touch('description')}
                 />
               </LiveField>
-              <LiveField
-                id="line-item"
-                label="Ítem de almacén (opcional)"
-                issue={lineChecks.itemId ?? null}
-                touched={show('itemId')}
-                hint="El ítem debe pertenecer al tenant; es opcional."
-              >
-                <Input
-                  id="line-item"
-                  className="font-mono text-xs"
-                  spellCheck={false}
-                  placeholder="UUID del ítem"
-                  value={line.itemId}
-                  onChange={(event) => setLine((current) => ({ ...current, itemId: event.target.value }))}
-                  onBlur={() => touch('itemId')}
+              <div className="flex flex-col gap-1.5">
+                <EntitySelector
+                  label="Ítem de almacén (opcional)"
+                  items={itemOptions}
+                  value={line.itemId === '' ? null : line.itemId}
+                  onChange={(id) => {
+                    setLine((current) => ({ ...current, itemId: id ?? '' }));
+                    touch('itemId');
+                  }}
+                  placeholder="Sin ítem"
+                  searchPlaceholder="Buscar por nombre…"
                 />
-              </LiveField>
+                <FieldMessage issue={lineChecks.itemId ?? null} touched={show('itemId')} validLabel="Dato aceptado." />
+                <p className="text-xs text-muted-foreground">El ítem debe pertenecer al tenant; es opcional.</p>
+              </div>
               <LiveField
                 id="line-planned"
                 label="Cantidad prevista"
@@ -367,10 +415,15 @@ export function ProgressPanel({
                       </span>
                       <Badge variant="outline">{row.status}</Badge>
                     </div>
+                    <span className="text-xs text-muted-foreground">
+                      {row.budgetLineId === null
+                        ? 'Sin línea de presupuesto'
+                        : (lineNames.get(row.budgetLineId) ?? `Línea ${row.budgetLineId.slice(0, 8)}…`)}
+                    </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                      partida {row.id}
-                      {row.budgetLineId === null ? ' · sin línea' : ` · línea ${row.budgetLineId}`} ·
-                      autor {row.reportedBy}
+                      partida {row.id.slice(0, 8)}…
+                      {row.budgetLineId === null ? ' · sin línea' : ` · línea ${row.budgetLineId.slice(0, 8)}…`} ·
+                      autor {row.reportedBy.slice(0, 8)}…
                     </span>
                   </div>
                   <span className="tabular text-xs text-muted-foreground">
@@ -390,22 +443,20 @@ export function ProgressPanel({
                 rechaza una línea de otra sede.
               </p>
               <div className="grid items-start gap-4 sm:grid-cols-3">
-                <LiveField
-                  id="entry-line"
-                  label="Línea de presupuesto (opcional)"
-                  issue={entryChecks.budgetLineId ?? null}
-                  touched={show('budgetLineId')}
-                >
-                  <Input
-                    id="entry-line"
-                    className="font-mono text-xs"
-                    spellCheck={false}
-                    placeholder="UUID de la línea"
-                    value={entry.budgetLineId}
-                    onChange={(event) => setEntry((current) => ({ ...current, budgetLineId: event.target.value }))}
-                    onBlur={() => touch('budgetLineId')}
+                <div className="flex flex-col gap-1.5">
+                  <EntitySelector
+                    label="Línea de presupuesto (opcional)"
+                    items={lineOptions}
+                    value={entry.budgetLineId === '' ? null : entry.budgetLineId}
+                    onChange={(id) => {
+                      setEntry((current) => ({ ...current, budgetLineId: id ?? '' }));
+                      touch('budgetLineId');
+                    }}
+                    placeholder="Sin línea"
+                    searchPlaceholder="Buscar por descripción…"
                   />
-                </LiveField>
+                  <FieldMessage issue={entryChecks.budgetLineId ?? null} touched={show('budgetLineId')} validLabel="Dato aceptado." />
+                </div>
                 <LiveField
                   id="entry-qty"
                   label="Cantidad ejecutada"

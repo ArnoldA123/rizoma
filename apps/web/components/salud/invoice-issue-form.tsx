@@ -19,6 +19,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { FieldMessage, SavedPulse, fieldStateProps } from '@/components/ui/field-feedback';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Input } from '@/components/ui/input';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { Select } from '@/components/ui/select';
@@ -34,7 +35,8 @@ import { FailurePanel } from '@/components/salud/states';
 import { billingDocumentTypeLabel, fiscalStatusLabel, fiscalStatusVariant } from '@/lib/labels';
 import { formatPen, shortId } from '@/lib/format';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { issueInvoice } from '@/lib/salud-api';
+import { issueInvoice, listCashSessions } from '@/lib/salud-api';
+import { listOrgNodes } from '@/lib/org-api';
 import { cn } from '@/lib/utils';
 
 /** What a quote hands to the issue form: identifiers and the priced lines. */
@@ -108,6 +110,39 @@ export function InvoiceIssueForm({
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [issued, setIssued] = useState<InvoiceRecord | null>(null);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+  const [cashSessionItems, setCashSessionItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    listCashSessions({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setCashSessionItems(
+          rows.map((row) => ({
+            id: row.id,
+            label: `${(row.openedAt ?? '').slice(0, 16).replace('T', ' ')} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
+            sub: row.openedByName ?? undefined,
+          })),
+        );
+      })
+      .catch(() => {
+        if (active) setCashSessionItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   // A quote handoff rewrites the draft: the lines are the quote's, and the
   // identifier travels as `quoteId` so the invoice stays traceable to it.
@@ -302,36 +337,31 @@ export function InvoiceIssueForm({
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="invoice-org-node" className="text-[0.8125rem] font-medium">
-                Sede (UUID)
-              </label>
-              <Input
-                id="invoice-org-node"
-                className="font-mono text-xs"
-                spellCheck={false}
-                value={draft.orgNodeId}
-                disabled={saving}
-                onChange={(event) => set('orgNodeId', event.target.value)}
-                onBlur={() => setTouched(true)}
-                {...fieldStateProps(checks.orgNodeId ?? null, touched)}
+              <EntitySelector
+                label="Sede"
+                items={sedeItems}
+                value={draft.orgNodeId === '' ? null : draft.orgNodeId}
+                onChange={(id) => {
+                  set('orgNodeId', id ?? '');
+                  setTouched(true);
+                }}
+                placeholder="Seleccionar sede…"
+                searchPlaceholder="Buscar por nombre…"
               />
               <FieldMessage issue={checks.orgNodeId ?? null} touched={touched} />
             </div>
 
             <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <label htmlFor="invoice-cash-session" className="text-[0.8125rem] font-medium">
-                Turno de caja (UUID, opcional)
-              </label>
-              <Input
-                id="invoice-cash-session"
-                className="font-mono text-xs"
-                spellCheck={false}
+              <EntitySelector
+                label="Turno de caja"
+                items={cashSessionItems}
+                value={draft.cashSessionId === '' ? null : draft.cashSessionId}
+                onChange={(id) => {
+                  set('cashSessionId', id ?? '');
+                  setTouched(true);
+                }}
                 placeholder="En blanco: el API usa el turno abierto de la sede"
-                value={draft.cashSessionId}
-                disabled={saving}
-                onChange={(event) => set('cashSessionId', event.target.value)}
-                onBlur={() => setTouched(true)}
-                {...fieldStateProps(checks.cashSessionId ?? null, touched)}
+                searchPlaceholder="Buscar por fecha…"
               />
               <FieldMessage issue={checks.cashSessionId ?? null} touched={touched} />
             </div>

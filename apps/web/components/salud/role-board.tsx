@@ -10,12 +10,14 @@ import {
   type SaludDashboardBoard,
 } from '@rizoma/contracts';
 import { Button } from '@/components/ui/button';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { FailurePanel } from '@/components/salud/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { DEV_IDENTITY } from '@/lib/config';
+import { listOrgNodes } from '@/lib/org-api';
 import { formatPen } from '@/lib/format';
 import { boardRoleLabel } from '@/lib/labels';
 import { getSaludBoard } from '@/lib/salud-api';
@@ -74,6 +76,24 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<ApiFailure | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const org = orgNodeId.trim();
   const cacheKey = boardCacheKey(role, org, date);
@@ -193,17 +213,16 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
               }}
             />
 
-            <label htmlFor="board-org" className="sr-only">
-              Sede del tablero
-            </label>
-            <Input
-              id="board-org"
-              className="w-64 font-mono text-xs"
-              spellCheck={false}
-              placeholder="Sede (UUID); vacío: nodo de la membresía"
-              value={orgNodeId}
-              onChange={(event) => setOrgNodeId(event.target.value)}
-            />
+            <div className="w-64">
+              <EntitySelector
+                label="Sede"
+                items={sedeItems}
+                value={org.trim() === '' ? null : org}
+                onChange={(id) => setOrgNodeId(id ?? '')}
+                placeholder="Nodo de la membresía"
+                searchPlaceholder="Buscar por nombre…"
+              />
+            </div>
           </div>
 
           {/* The cadence in force is exposed as a pressed state, so a screen

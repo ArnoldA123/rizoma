@@ -18,6 +18,7 @@
 // produces exactly the row the service would.
 import { z } from 'zod';
 import { isoValueSchema, uuidSchema } from './common.ts';
+import { pagedListSchema, paginationQuerySchema } from './pagination.ts';
 
 // ============ records ============
 
@@ -110,6 +111,79 @@ export const budgetLineRecordSchema = z.object({
 });
 
 export type BudgetLineRecord = z.infer<typeof budgetLineRecordSchema>;
+
+/**
+ * `GET .../budget-lines` — one budget line with the catalogue item names
+ * resolved (`JOIN inventory_items`); `itemSku`/`itemName` are `null` when the
+ * line has no item, so the screen renders the description, never a UUID.
+ */
+export const budgetLineWithItemSchema = budgetLineRecordSchema.extend({
+  itemSku: z.string().nullable(),
+  itemName: z.string().nullable(),
+});
+
+export type BudgetLineWithItem = z.infer<typeof budgetLineWithItemSchema>;
+
+/**
+ * `GET .../budget-lines` — bare array capped at 200 (legacy path, no cursor),
+ * alphabetical by description.
+ */
+export const budgetLineListSchema = z.array(budgetLineWithItemSchema);
+export type BudgetLineList = z.infer<typeof budgetLineListSchema>;
+
+/**
+ * Query filters of `GET .../budget-lines`, field-for-field what the service
+ * parser (`parseBudgetLineListFilters` in `resources.service.ts`) accepts.
+ * The site rides in the path (or `?site=` on the flat route); only the
+ * activation flag is a query filter.
+ */
+export const budgetLineListQuerySchema = z.object({
+  active: z.boolean().nullable().optional(),
+});
+export type BudgetLineListQuery = z.infer<typeof budgetLineListQuerySchema>;
+
+/** Keyset query (`?cursor=` / `?limit=`) shared with every R1 listing. */
+export const budgetLinePageQuerySchema = paginationQuerySchema;
+export type BudgetLinePageQuery = z.infer<typeof budgetLinePageQuerySchema>;
+
+/** Keyset page of `GET .../budget-lines` (`{rows, nextCursor}`). */
+export const budgetLinePagedSchema = pagedListSchema(budgetLineWithItemSchema);
+export type BudgetLinePaged = z.infer<typeof budgetLinePagedSchema>;
+
+/** One crew (`crews`), as `GET /v1/obras/crews` answers it. */
+export const crewRecordSchema = z.object({
+  id: uuidSchema,
+  name: z.string(),
+  orgNodeId: uuidSchema,
+  active: z.boolean(),
+});
+
+export type CrewRecord = z.infer<typeof crewRecordSchema>;
+
+/**
+ * `GET /v1/obras/crews` — bare array capped at 200 (legacy path, no cursor),
+ * alphabetical by name.
+ */
+export const crewListSchema = z.array(crewRecordSchema);
+export type CrewList = z.infer<typeof crewListSchema>;
+
+/**
+ * Query filters of `GET /v1/obras/crews`, field-for-field what the service
+ * parser (`parseCrewListFilters` in `crews.service.ts`) accepts.
+ */
+export const crewListQuerySchema = z.object({
+  orgNodeId: uuidSchema.nullable().optional(),
+  active: z.boolean().nullable().optional(),
+});
+export type CrewListQuery = z.infer<typeof crewListQuerySchema>;
+
+/** Keyset query (`?cursor=` / `?limit=`) shared with every R1 listing. */
+export const crewPageQuerySchema = paginationQuerySchema;
+export type CrewPageQuery = z.infer<typeof crewPageQuerySchema>;
+
+/** Keyset page of `GET /v1/obras/crews` (`{rows, nextCursor}`). */
+export const crewPagedSchema = pagedListSchema(crewRecordSchema);
+export type CrewPaged = z.infer<typeof crewPagedSchema>;
 
 /** One executed quantity (`progress_entries`), posted on creation. */
 export const progressEntryRecordSchema = z.object({

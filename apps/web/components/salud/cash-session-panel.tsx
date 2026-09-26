@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import {
   CASH_TOTAL_METHODS,
   checkOptionalAmountField,
@@ -10,25 +10,25 @@ import {
   type FieldCheck,
 } from '@rizoma/contracts';
 import { Button } from '@/components/ui/button';
+import { EntitySelector, type EntityItem } from '@/components/ui/entity-select';
 import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle } from '@/components/ui/card';
 import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
 import { FailurePanel } from '@/components/salud/states';
-import { formatPen, formatUtcStamp, shortId } from '@/lib/format';
+import { formatPen, formatUtcStamp } from '@/lib/format';
 import { paymentMethodLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { closeCashSession, openCashSession } from '@/lib/salud-api';
+import { closeCashSession, listCashSessions, openCashSession } from '@/lib/salud-api';
+import { listOrgNodes } from '@/lib/org-api';
 
 /**
  * Cash shift of the caja screen: open, and close with an arqueo.
  *
- * Two facts about the API shape this panel, and both are stated in the copy
- * instead of being hidden behind a spinner:
+ * Two facts about the API shape this panel:
  *
- *   - there is no "list my shifts" endpoint, only `open` and `close`. The panel
- *     therefore works with the shift this session opened (or with an identifier
- *     the operator pastes from the caja board, which is where the open shift of a
- *     sede is visible);
+ *   - the shift is picked from the scope list with a browser-side search: the
+ *     open form picks the sede, the close form picks the shift by opening date
+ *     and status, and the id travels as the option value;
  *   - `POST /cash-sessions/close` takes the per-method totals as free JSONB, so
  *     the arqueo is declared here and stored as the cashier wrote it. The screen
  *     does not sum the day's payments into it: the declared count and the
@@ -67,13 +67,19 @@ export function CashSessionPanel({
         {session === null ? null : (
           <dl className="tabular grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-border bg-secondary px-4 py-3 text-xs">
             <dt className="text-muted-foreground">turno</dt>
-            <dd className="font-mono break-all">{session.id}</dd>
+            <dd>
+              {formatUtcStamp(session.openedAt)} · {session.status === 'open' ? 'abierto' : 'cerrado'}
+            </dd>
             <dt className="text-muted-foreground">estado</dt>
             <dd>{session.status === 'open' ? 'abierto' : 'cerrado'}</dd>
             <dt className="text-muted-foreground">apertura</dt>
             <dd>{formatUtcStamp(session.openedAt)}</dd>
             <dt className="text-muted-foreground">cierre</dt>
             <dd>{formatUtcStamp(session.closedAt)}</dd>
+            <dt className="text-muted-foreground">id</dt>
+            <dd className="font-mono text-[0.6875rem] text-muted-foreground break-all">
+              {session.id}
+            </dd>
             {session.status === 'closed' ? (
               <>
                 <dt className="text-muted-foreground">arqueo</dt>
@@ -113,6 +119,24 @@ function OpenShiftForm({ defaultOrgNodeId, onOpened, disabled }: OpenShiftFormPr
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
+  const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+      })
+      .catch(() => {
+        if (active) setSedeItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const checks: Readonly<Record<string, FieldCheck>> = {
     orgNodeId: checkUuidField('orgNodeId', orgNodeId),
@@ -139,22 +163,20 @@ function OpenShiftForm({ defaultOrgNodeId, onOpened, disabled }: OpenShiftFormPr
   return (
     <form className="flex flex-col gap-3" onSubmit={handleSubmit} noValidate>
       <div className="flex flex-col gap-1.5">
-        <label htmlFor="cash-org-node" className="text-[0.8125rem] font-medium">
-          Sede del turno (UUID)
-        </label>
-        <Input
-          id="cash-org-node"
-          className="font-mono text-xs"
-          spellCheck={false}
-          value={orgNodeId}
+        <EntitySelector
+          label="Sede del turno"
+          items={sedeItems}
+          value={orgNodeId === '' ? null : orgNodeId}
+          onChange={(id) => {
+            setOrgNodeId(id ?? '');
+            setTouched(true);
+          }}
+          placeholder="Seleccionar sede…"
+          searchPlaceholder="Buscar por nombre…"
           disabled={disabled}
-          onChange={(event) => setOrgNodeId(event.target.value)}
-          onBlur={() => setTouched(true)}
-          {...fieldStateProps(checks.orgNodeId ?? null, touched)}
         />
         <p className="text-xs text-muted-foreground">
-          MVP1 no expone un listado de nodos: la sede viaja como identificador. El valor
-          predeterminado sale de la última fila real que leyó la pantalla.
+          El valor predeterminado sale de la última fila real que leyó la pantalla.
         </p>
         <FieldMessage issue={checks.orgNodeId ?? null} touched={touched} validLabel="Sede aceptada." />
       </div>
@@ -191,6 +213,30 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [closed, setClosed] = useState<CashSessionRecord | null>(null);
+  const [sessionItems, setSessionItems] = useState<readonly EntityItem[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listCashSessions({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setSessionItems(
+          rows.map((row) => ({
+            id: row.id,
+            label: `${(row.openedAt ?? '').slice(0, 16).replace('T', ' ')} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
+            sub: row.openedByName ?? undefined,
+          })),
+        );
+      })
+      .catch(() => {
+        if (active) setSessionItems([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   const target = cashSessionId.trim() === '' ? (session?.id ?? '') : cashSessionId;
   const checks: Readonly<Record<string, FieldCheck>> = {
@@ -233,22 +279,23 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
   return (
     <form className="flex flex-col gap-3" onSubmit={handleSubmit} noValidate>
       <div className="flex flex-col gap-1.5">
-        <label htmlFor="cash-close-id" className="text-[0.8125rem] font-medium">
-          Turno a cerrar (UUID)
-        </label>
-        <Input
-          id="cash-close-id"
-          className="font-mono text-xs"
-          spellCheck={false}
-          placeholder={session?.id ?? 'Turno abierto de la sede'}
-          value={cashSessionId}
-          onChange={(event) => setCashSessionId(event.target.value)}
-          onBlur={() => setTouched(true)}
-          {...fieldStateProps(checks.cashSessionId ?? null, touched)}
+        <EntitySelector
+          label="Turno a cerrar"
+          items={session?.id == null ? sessionItems : [
+            { id: session.id, label: `${(session.openedAt ?? '').slice(0, 16).replace('T', ' ')} · ${session.status === 'open' ? 'abierto' : 'cerrado'}`, sub: session.openedByName ?? undefined },
+            ...sessionItems.filter((item) => item.id !== session.id),
+          ]}
+          value={cashSessionId === '' ? null : cashSessionId}
+          onChange={(id) => {
+            setCashSessionId(id ?? '');
+            setTouched(true);
+          }}
+          placeholder="En blanco: turno de esta pantalla"
+          searchPlaceholder="Buscar por fecha…"
         />
         <p className="text-xs text-muted-foreground">
-          En blanco se cierra el turno que abrió esta pantalla. Para uno anterior, copie el
-          identificador desde el tablero de caja.
+          En blanco se cierra el turno que abrió esta pantalla. Para uno anterior, elíjalo de la
+          lista del alcance.
         </p>
         <FieldMessage
           issue={checks.cashSessionId ?? null}
@@ -287,7 +334,7 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
         </Button>
         {closed === null ? null : (
           <span role="status" className="sd-rise text-xs text-muted-foreground">
-            Turno {shortId(closed.id)} cerrado el {formatUtcStamp(closed.closedAt)}.
+            Turno del {formatUtcStamp(closed.openedAt)} cerrado el {formatUtcStamp(closed.closedAt)}.
           </span>
         )}
       </div>
