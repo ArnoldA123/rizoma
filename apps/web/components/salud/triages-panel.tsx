@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { z } from 'zod';
 import type { EpisodeRecord, FieldCheck, TriageRecord } from '@rizoma/contracts';
 import { checkDateField, checkNumberField, checkOptionalText, checkOptionalUuidField, checkRequiredText, firstIssue } from '@rizoma/contracts';
@@ -15,6 +15,7 @@ import { SkeletonRows } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createTriage, listTriages } from '@/lib/salud-api';
+import { listUsers } from '@/lib/users-api';
 import { formatUtcDate, utcDateOf, utcTimeOf } from '@/lib/salud-time';
 
 /**
@@ -101,6 +102,18 @@ const VITAL_FIELDS = [
   { key: 'weightKg', label: 'Peso (kg)' },
 ] as const;
 
+/** Spanish label of one `values` key: vitals from `VITAL_FIELDS`, `note` as
+ * Nota, and any tenant custom code as neutral text (the code is the label
+ * the tenant defined). Raw storage keys never reach the screen. */
+const VITAL_LABEL_BY_KEY: Readonly<Record<string, string>> = Object.fromEntries([
+  ...VITAL_FIELDS.map(({ key, label }) => [key, label] as const),
+  ['note', 'Nota'] as const,
+]);
+
+function vitalValueLabel(key: string): string {
+  return VITAL_LABEL_BY_KEY[key] ?? key;
+}
+
 export function TriagesPanel({ patientId, episodes, canWrite, className }: TriagesPanelProps) {
   const [triages, setTriages] = useState<TriageRecord[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -109,6 +122,34 @@ export function TriagesPanel({ patientId, episodes, canWrite, className }: Triag
   const [success, setSuccess] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  // Recorder names: the triage endpoint carries only the id, so it resolves
+  // in the browser against the personnel list. A failed read leaves the map
+  // empty and the row falls back to the short id (P2-2a convention).
+  const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listUsers({}, controller.signal)
+      .then((rows) => {
+        if (!active) return;
+        setUserNames(new Map(rows.map((row) => [row.id, row.name])));
+      })
+      .catch(() => {
+        if (active) setUserNames(new Map());
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  // Episodes of this patient by id: the history links each row to its episode
+  // by name (specialty + date) instead of the raw id.
+  const episodeById = useMemo(
+    () => new Map(episodes.map((episode) => [episode.id, episode] as const)),
+    [episodes],
+  );
 
   const reload = useCallback(() => setReloadKey((current) => current + 1), []);
 
@@ -202,34 +243,49 @@ export function TriagesPanel({ patientId, episodes, canWrite, className }: Triag
 
         {rows.length === 0 ? null : (
           <ul className="flex flex-col">
-            {rows.map((triage) => (
-              <li
-                key={triage.id}
-                className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3 last:border-b-0"
-              >
-                <div className="flex min-w-0 flex-col gap-1.5">
-                  <span className="tabular text-[0.8125rem]">
-                    {triage.at === null
-                      ? 'sin hora registrada'
-                      : `${formatUtcDate(utcDateOf(triage.at) ?? '')} · ${utcTimeOf(triage.at)} UTC`}
-                  </span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {Object.entries(triage.values).map(([key, value]) => (
-                      <Badge key={`${triage.id}-${key}`} variant="outline">
-                        {key}: {String(value)}
-                      </Badge>
-                    ))}
+            {rows.map((triage) => {
+              const episode =
+                triage.episodeId === null ? undefined : episodeById.get(triage.episodeId);
+              const episodeName =
+                triage.episodeId === null
+                  ? 'sin episodio'
+                  : (episode === undefined
+                      ? `episodio ${triage.episodeId.slice(0, 8)}…`
+                      : `${episode.specialty}${(episode.openedAt ?? '').slice(0, 10) === '' ? '' : ` · ${(episode.openedAt ?? '').slice(0, 10)}`}`);
+              const recorderName =
+                userNames.get(triage.recordedBy) ?? 'Personal sin nombre en el alcance';
+              return (
+                <li
+                  key={triage.id}
+                  className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3 last:border-b-0"
+                >
+                  <div className="flex min-w-0 flex-col gap-1.5">
+                    <span className="tabular text-[0.8125rem]">
+                      {triage.at === null
+                        ? 'sin hora registrada'
+                        : `${formatUtcDate(utcDateOf(triage.at) ?? '')} · ${utcTimeOf(triage.at)} UTC`}
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Object.entries(triage.values).map(([key, value]) => (
+                        <Badge key={`${triage.id}-${key}`} variant="outline">
+                          {vitalValueLabel(key)}: {String(value)}
+                        </Badge>
+                      ))}
+                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      {episodeName} · {recorderName}
+                    </span>
+                    <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
+                      {triage.episodeId === null
+                        ? 'sin episodio'
+                        : `episodio ${triage.episodeId.slice(0, 8)}…`}
+                      {' · registró '}
+                      {triage.recordedBy.slice(0, 8)}…
+                    </span>
                   </div>
-                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                    {triage.episodeId === null
-                      ? 'sin episodio'
-                      : `episodio ${triage.episodeId.slice(0, 8)}…`}
-                    {' · registró '}
-                    {triage.recordedBy.slice(0, 8)}…
-                  </span>
-                </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         )}
       </CardContent>

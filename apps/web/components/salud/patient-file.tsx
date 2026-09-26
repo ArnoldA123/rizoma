@@ -24,6 +24,27 @@ import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
 
 /**
+ * Spanish labels for the `patient_files.contacts` bag. `phone` is the fixed
+ * key `PatientForm` writes; the rest are the typed custom keys a tenant may
+ * define (telefono/correo/direccion, …). Unknown keys fall back to the raw
+ * key as neutral text — the bag is never rendered as JSON.
+ */
+const CONTACT_LABELS: Readonly<Record<string, string>> = {
+  phone: 'Teléfono',
+  telefono: 'Teléfono',
+  email: 'Correo',
+  correo: 'Correo',
+  address: 'Dirección',
+  direccion: 'Dirección',
+  dirección: 'Dirección',
+};
+
+/** Spanish label of one contacts key, or the raw key when the tenant owns it. */
+function contactLabel(key: string): string {
+  return CONTACT_LABELS[key.toLowerCase()] ?? key;
+}
+
+/**
  * `/salud/pacientes/[id]` — the ficha 360.
  *
  * The screen is the composition of the six things a patient file is made of,
@@ -186,12 +207,17 @@ export function PatientFile({
             </Alert>
           )}
 
-          {Object.keys(record.contacts).length === 0 ? null : (
+          {Object.entries(record.contacts).length === 0 ? null : (
             <div className="flex flex-col gap-1">
               <span className="text-[0.8125rem] font-medium">Contactos</span>
-              <span className="tabular font-mono text-xs text-muted-foreground">
-                {JSON.stringify(record.contacts)}
-              </span>
+              <ul className="flex flex-col gap-0.5">
+                {Object.entries(record.contacts).map(([key, value]) => (
+                  <li key={key} className="text-xs text-muted-foreground">
+                    <span className="font-medium text-foreground">{contactLabel(key)}:</span>{' '}
+                    {String(value)}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </CardContent>
