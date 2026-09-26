@@ -14,3 +14,6 @@ dist/
 .next/
 *.tsbuildinfo
 coverage/
+
+# Product design docs stay local (never published to the remote)
+docs/crm-maleable/
