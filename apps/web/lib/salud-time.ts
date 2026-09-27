@@ -12,10 +12,144 @@
 //
 // The module is pure and dependency-free so it stays usable from a Client
 // Component and readable in review.
-import { isRealUtcDate } from '@rizoma/contracts';
+import { isRealUtcDate, normalizeOrgTimezone } from '@rizoma/contracts';
+import type { OrgNodeRecord } from '@rizoma/contracts';
 
 /** Locale used for the day and time labels of the demo. */
 const LOCALE = 'es-PE';
+
+/**
+ * Fallback sede zone (P4-1b): every "today" on screen is the day of the
+ * sede, and a sede with no usable zone reads as Lima. Mirrors
+ * `DEFAULT_ORG_TIMEZONE` from `@rizoma/contracts`.
+ */
+export const SEDE_FALLBACK_TIMEZONE = 'America/Lima';
+
+/**
+ * Usable IANA zone of a sede, or the Lima fallback. The sede travels as a
+ * parameter: callers resolve it with `listOrgNodes` and land here when the
+ * row is missing or the read failed.
+ */
+export function normalizeSedeTimezone(value: unknown): string {
+  const zone = normalizeOrgTimezone(value);
+  return zone === '' ? SEDE_FALLBACK_TIMEZONE : zone;
+}
+
+/**
+ * Zone of the preferred sede node, or of the first node when the preferred
+ * one is absent, or the Lima fallback when there are no nodes at all.
+ * Components resolve the sede this way after `listOrgNodes`.
+ */
+export function resolveSedeTimezone(
+  nodes: readonly OrgNodeRecord[],
+  preferredId?: string | null,
+): string {
+  if (preferredId !== undefined && preferredId !== null && preferredId !== '') {
+    const match = nodes.find((row) => row.id === preferredId);
+    if (match !== undefined) return normalizeSedeTimezone(match.timezone);
+  }
+  const first = nodes[0];
+  if (first === undefined) return SEDE_FALLBACK_TIMEZONE;
+  return normalizeSedeTimezone(first.timezone);
+}
+
+/** Zone every sede helper formats in: the given zone, or Lima when unusable. */
+function sedeZone(timezone?: string | null): string {
+  return normalizeSedeTimezone(timezone ?? SEDE_FALLBACK_TIMEZONE);
+}
+
+/** Formatter bound to one zone, so a bad zone never throws at render time. */
+function sedeFormatter(
+  timezone: string | null | undefined,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(LOCALE, { ...options, timeZone: sedeZone(timezone) });
+}
+
+/**
+ * `YYYY-MM-DD` of an ISO instant, read in the sede zone. `2026-09-26T04:30Z`
+ * is still 25 September in Lima, while the UTC grouping reads the 26th.
+ * `null` in, `null` out; `null` for an unreadable instant or zone.
+ */
+export function sedeDateOf(iso: string | null | undefined, timezone?: string | null): string | null {
+  const date = toDate(iso);
+  if (date === null) return null;
+  try {
+    const parts = sedeFormatter(timezone, { year: 'numeric', month: '2-digit', day: '2-digit' })
+      .formatToParts(date)
+      .filter((part) => part.type === 'year' || part.type === 'month' || part.type === 'day')
+      .sort((left, right) => partOrder(left.type) - partOrder(right.type));
+    if (parts.length !== 3) return null;
+    return parts.map((part) => part.value).join('-');
+  } catch {
+    return null;
+  }
+}
+
+/** `HH:mm` of an ISO instant, read in the sede zone. */
+export function sedeTimeOf(iso: string | null | undefined, timezone?: string | null): string {
+  const date = toDate(iso);
+  if (date === null) return '—';
+  try {
+    return sedeFormatter(timezone, { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+  } catch {
+    return '—';
+  }
+}
+
+/** `HH:mm–HH:mm` span of an appointment, in the sede zone. */
+export function sedeTimeRange(
+  startsAt: string | null,
+  durationMin: number,
+  timezone?: string | null,
+): string {
+  const date = toDate(startsAt);
+  if (date === null) return '—';
+  return `${sedeTimeOf(startsAt, timezone)}–${sedeTimeOf(new Date(date.getTime() + durationMin * 60_000).toISOString(), timezone)}`;
+}
+
+/** Today, as the sede day the screens group by. */
+export function currentSedeDate(timezone?: string | null, now: Date = new Date()): string {
+  return sedeDateOf(now.toISOString(), timezone) ?? currentUtcDate(now);
+}
+
+/** `true` when the day is today in the sede zone (used for the Hoy button). */
+export function isCurrentSedeDate(
+  date: string,
+  timezone?: string | null,
+  now: Date = new Date(),
+): boolean {
+  return date === currentSedeDate(timezone, now);
+}
+
+/**
+ * `25 sep 2026 11:05` — a timestamp in the sede zone, or `—` when absent.
+ * No zone suffix: the hour on screen is always the sede's.
+ */
+export function formatSedeStamp(iso: string | null | undefined, timezone?: string | null): string {
+  const date = toDate(iso);
+  if (date === null) return '—';
+  try {
+    return sedeFormatter(timezone, {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date);
+  } catch {
+    return '—';
+  }
+}
+
+/** Sort weight of a date part, so `formatToParts` always joins `YYYY-MM-DD`. */
+function partOrder(type: Intl.DateTimeFormatPartTypes): number {
+  if (type === 'year') return 0;
+  if (type === 'month') return 1;
+  if (type === 'day') return 2;
+  return 3;
+}
 
 /** `YYYY-MM-DD` of an ISO instant, read in UTC. `null` in, `null` out. */
 export function utcDateOf(iso: string | null | undefined): string | null {

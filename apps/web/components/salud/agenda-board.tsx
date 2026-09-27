@@ -15,6 +15,7 @@ import { requestJson } from '@/lib/api-client';
 import { listPatients } from '@/lib/salud-api';
 import { listUsers } from '@/lib/users-api';
 import { listOrgNodes } from '@/lib/org-api';
+import type { OrgNodeRecord } from '@rizoma/contracts';
 import { withSavedView } from '@/lib/views-api';
 import {
   appointmentStatusLabel,
@@ -24,17 +25,19 @@ import {
 import {
   agendaViewFor,
   appointmentsOfProfessional,
-  appointmentsOnUtcDate,
+  appointmentsOnSedeDate,
   statusCounts,
   type AgendaView,
 } from '@/lib/salud-select';
 import {
-  currentUtcDate,
+  currentSedeDate,
   formatElapsed,
   formatUtcDateLong,
-  isCurrentUtcDate,
+  isCurrentSedeDate,
+  normalizeSedeTimezone,
+  resolveSedeTimezone,
+  sedeTimeRange,
   shiftUtcDate,
-  utcTimeRange,
 } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
@@ -59,8 +62,9 @@ import { cn } from '@/lib/utils';
  *     endpoint hides other professionals' rows.
  *   - **Skeletons shaped like the row**, with the directional sweep, instead of a
  *     spinner: the day keeps its geometry while it loads.
- *   - **UTC everywhere.** The day filter, the navigation and the labels are UTC,
- *     which is what makes this screen agree with `?date=` on the dashboards.
+ *   - **Sede day everywhere.** The day filter, the navigation and the labels use
+ *     the sede day (org tree zone, Lima fallback), which is what makes this
+ *     screen agree with `?date=` on the dashboards.
  */
 export interface AgendaBoardProps {
   readonly role: string | null;
@@ -83,7 +87,7 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
     `agenda:${savedViewId ?? ''}`,
     (signal) => readAgenda(savedViewId, signal),
   );
-  const [day, setDay] = useState<string>(() => currentUtcDate());
+  const [day, setDay] = useState<string>(() => currentSedeDate());
   const [focusOwn, setFocusOwn] = useState(view === 'medico');
   const [formOpen, setFormOpen] = useState(view === 'recepcion');
   const [now, setNow] = useState(() => Date.now());
@@ -94,6 +98,7 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
   const [patientNames, setPatientNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [sedeNames, setSedeNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -110,6 +115,7 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
         }
         if (sedes.status === 'fulfilled') {
           setSedeNames(new Map(sedes.value.map((row) => [row.id, row.name])));
+          setSedeNodes(sedes.value);
         }
       },
     );
@@ -144,11 +150,17 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
   }, []);
 
   const rows = appointments.data ?? [];
-  const dayRows = appointmentsOnUtcDate(rows, day);
+  const knownOrgNodeId = rows[0]?.orgNodeId ?? DEV_IDENTITY.orgNodeId;
+  // The sede travels as a parameter: resolved from the org tree against the
+  // first row's sede, Lima fallback when the read failed or has no zone.
+  const sedeTimezone =
+    sedeNodes.length === 0
+      ? normalizeSedeTimezone(null)
+      : resolveSedeTimezone(sedeNodes, knownOrgNodeId);
+  const dayRows = appointmentsOnSedeDate(rows, day, sedeTimezone);
   const visible =
     focusOwn && view === 'medico' ? appointmentsOfProfessional(dayRows, viewerId) : dayRows;
   const counts = statusCounts(dayRows);
-  const knownOrgNodeId = rows[0]?.orgNodeId ?? DEV_IDENTITY.orgNodeId;
 
   const handleCreated = useCallback(
     (appointment: AppointmentRecord) => {
@@ -161,14 +173,14 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardEyebrow>Agenda · día UTC</CardEyebrow>
+          <CardEyebrow>Agenda · día de la sede</CardEyebrow>
           <CardTitle as="h2" className="text-lg">
             {formatUtcDateLong(day)}
           </CardTitle>
           <CardDescription>
             Vista {viewLabel(view)} para {roleLabel(role)}. El filtro por día, la navegación y las
-            etiquetas usan UTC; la hora de la cita se escribe en hora local y se convierte una sola
-            vez al programarla.
+            etiquetas usan el día de la sede; la hora de la cita se escribe en hora local y se
+            convierte una sola vez al programarla.
           </CardDescription>
         </CardHeader>
 
@@ -183,12 +195,12 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
               Día anterior
             </Button>
             <Button
-              variant={isCurrentUtcDate(day) ? 'ghost' : 'outline'}
+              variant={isCurrentSedeDate(day, sedeTimezone) ? 'ghost' : 'outline'}
               size="sm"
-              onClick={() => setDay(currentUtcDate())}
-              disabled={isCurrentUtcDate(day)}
+              onClick={() => setDay(currentSedeDate(sedeTimezone))}
+              disabled={isCurrentSedeDate(day, sedeTimezone)}
             >
-              Hoy (UTC)
+              Hoy
             </Button>
             <Button variant="outline" size="sm" onClick={() => setDay(shiftUtcDate(day, 1))}>
               Día siguiente
@@ -288,7 +300,7 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
                 >
                   <div className="flex min-w-0 items-baseline gap-4">
                     <span className="tabular w-28 shrink-0 text-[0.9375rem] font-medium">
-                      {utcTimeRange(appointment.startsAt, appointment.durationMin)}
+                      {sedeTimeRange(appointment.startsAt, appointment.durationMin, sedeTimezone)}
                     </span>
                     <span className="flex min-w-0 flex-col gap-0.5">
                       <span className="text-[0.8125rem]">

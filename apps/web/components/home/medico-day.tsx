@@ -13,8 +13,10 @@ import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { appointmentStatusLabel } from '@/lib/labels';
 import { getSaludBoard, listAppointments, listPatients } from '@/lib/salud-api';
 import { listUsers } from '@/lib/users-api';
-import { appointmentsOfProfessional, appointmentsOnUtcDate } from '@/lib/salud-select';
-import { currentUtcDate, formatUtcDateLong, utcTimeRange } from '@/lib/salud-time';
+import { listOrgNodes } from '@/lib/org-api';
+import type { OrgNodeRecord } from '@rizoma/contracts';
+import { appointmentsOfProfessional, appointmentsOnSedeDate } from '@/lib/salud-select';
+import { currentSedeDate, formatUtcDateLong, resolveSedeTimezone, sedeTimeRange } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import type { HomeLink } from './role-home';
 
@@ -29,15 +31,38 @@ export interface MedicoDayProps {
  *
  * Counts come from the médico board (`myAppointments`, `openEpisodes`,
  * `pendingConsents`); the rows below are the physician's own appointments of
- * today in UTC, with patient names resolved against the scope lists. No
- * identifier is rendered — names own the rows.
+ * today in the sede zone, with patient names resolved against the scope
+ * lists. No identifier is rendered — names own the rows.
  */
 export function MedicoDay({ viewerId, links }: MedicoDayProps) {
-  const today = currentUtcDate();
   const board = useResource('home-board:medico', (signal) => getSaludBoard('medico', {}, signal));
   const agenda = useResource('home-agenda:medico', (signal) => listAppointments(signal));
   const [patientNames, setPatientNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
+  // The sede travels as a parameter: zone of the first agenda sede from the
+  // org tree, Lima fallback while the list loads or when the row has no zone.
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((nodes) => {
+        if (active) setSedeNodes(nodes);
+      })
+      .catch(() => {
+        if (active) setSedeNodes([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  const agendaRows = agenda.data ?? [];
+  const boardOrg = board.data !== null && board.data.role === 'medico' ? board.data.orgNodeId : null;
+  const sedeTimezone = resolveSedeTimezone(sedeNodes, agendaRows[0]?.orgNodeId ?? boardOrg);
+  const today = currentSedeDate(sedeTimezone);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -60,14 +85,14 @@ export function MedicoDay({ viewerId, links }: MedicoDayProps) {
 
   const medicoBoard = board.data !== null && board.data.role === 'medico' ? board.data : null;
   const ownRows = appointmentsOfProfessional(
-    appointmentsOnUtcDate(agenda.data ?? [], today),
+    appointmentsOnSedeDate(agendaRows, today, sedeTimezone),
     viewerId,
   );
 
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        eyebrow="Médico · hoy (UTC)"
+        eyebrow="Médico · hoy"
         title="Sus citas de hoy"
         description={`${formatUtcDateLong(today)}: sus citas con nombre y hora, más sus episodios abiertos y consentimientos por firmar.`}
         action={
@@ -125,7 +150,7 @@ export function MedicoDay({ viewerId, links }: MedicoDayProps) {
                 >
                   <div className="flex min-w-0 items-baseline gap-4">
                     <span className="tabular w-28 shrink-0 text-[0.9375rem] font-medium">
-                      {utcTimeRange(appointment.startsAt, appointment.durationMin)}
+                      {sedeTimeRange(appointment.startsAt, appointment.durationMin, sedeTimezone)}
                     </span>
                     <span className="flex min-w-0 flex-col gap-0.5">
                       <span className="text-[0.8125rem]">

@@ -158,7 +158,7 @@ export function AppointmentForm({
         code: 'client.invalid_datetime',
         reason: null,
         traceId: null,
-        message: 'La fecha y hora no se pudieron convertir a UTC.',
+        message: 'La fecha y hora no se pudieron guardar.',
         hint: 'Corrija el campo de fecha y hora.',
       });
       return;
@@ -192,7 +192,7 @@ export function AppointmentForm({
         <CardTitle as="h2">Nueva cita</CardTitle>
         <CardDescription>
           La hora se escribe en hora local y se envía como instante con offset; la agenda agrupa por
-          día UTC. Paciente, profesional y sede se eligen de la lista del alcance con buscador.
+          día de la sede. Paciente, profesional y sede se eligen de la lista del alcance con buscador.
         </CardDescription>
       </CardHeader>
 
@@ -202,7 +202,7 @@ export function AppointmentForm({
             <LiveInput
               id="appointment-starts-at"
               label="Fecha y hora (hora local)"
-              hint="Se convierte a instante UTC con offset."
+              hint="Se guarda con la hora de la sede."
               issue={checks.startsAt ?? null}
               touched={show('startsAt')}
             >

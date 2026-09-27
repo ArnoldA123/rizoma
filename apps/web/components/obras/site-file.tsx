@@ -23,7 +23,7 @@ import { ORG_SCOPED_SITE_ROLES, resolveSiteAccess } from '@/lib/access';
 import { formatPen } from '@/lib/format';
 import { obraDenialReasonLabel, siteStatusLabel, siteStatusVariant } from '@/lib/labels';
 import { getSite, listSiteStaff } from '@/lib/obras-api';
-import { currentUtcDate, formatUtcDate } from '@/lib/salud-time';
+import { currentSedeDate, formatUtcDate } from '@/lib/salud-time';
 import { type ApiFailure } from '@/lib/salud-errors';
 import { usePrefersReducedMotion } from '@/lib/use-prefers-reduced-motion';
 import { useResource } from '@/lib/use-resource';
@@ -94,7 +94,7 @@ export function SiteFile({
   canWriteSite,
   canConsumeStock,
 }: SiteFileProps) {
-  const [date, setDate] = useState(() => currentUtcDate());
+  const [date, setDate] = useState(() => currentSedeDate());
   // Shared selection between the board and the panels: the board is the only read
   // of the vertical that returns asset, item and milestone identifiers, so
   // picking a row is what fills these fields.

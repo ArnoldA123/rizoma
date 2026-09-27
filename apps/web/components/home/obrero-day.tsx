@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
-import type { AttendanceRecord, SiteRecord } from '@rizoma/contracts';
+import { useEffect, useState } from 'react';
+import type { AttendanceRecord, OrgNodeRecord, SiteRecord } from '@rizoma/contracts';
 import { PageHeader } from '@/components/page-header';
 import { RouteIcon } from '@/components/route-icon';
 import { EntitySelector } from '@/components/ui/entity-select';
@@ -12,10 +12,11 @@ import { SkeletonRows } from '@/components/ui/skeleton';
 import { IconArrowRight } from '@/components/ui/icons';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { formatUtcStamp } from '@/lib/format';
+import { formatSedeStamp } from '@/lib/format';
 import { attendanceStatusLabel } from '@/lib/labels';
 import { listAttendance, listSites, markAttendance } from '@/lib/obras-api';
-import { currentUtcDate, formatUtcDateLong } from '@/lib/salud-time';
+import { listOrgNodes } from '@/lib/org-api';
+import { currentSedeDate, formatUtcDateLong, resolveSedeTimezone } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import type { HomeLink } from './role-home';
 
@@ -36,12 +37,33 @@ export interface ObreroDayProps {
  * rendered.
  */
 export function ObreroDay({ viewerId, links }: ObreroDayProps) {
-  const today = currentUtcDate();
   const sites = useResource<SiteRecord[]>('home-sites:trabajador', (signal) =>
     listSites(signal),
   );
   const rows = sites.data ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The sede travels as a parameter: first sede zone from the org tree, Lima
+  // fallback while the list loads or when the row has no zone.
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((nodes) => {
+        if (active) setSedeNodes(nodes);
+      })
+      .catch(() => {
+        if (active) setSedeNodes([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  const sedeTimezone = resolveSedeTimezone(sedeNodes);
+  const today = currentSedeDate(sedeTimezone);
   const activeId = selectedId ?? rows[0]?.id ?? null;
   const active = rows.find((row) => row.id === activeId) ?? rows[0] ?? null;
 
@@ -71,7 +93,7 @@ export function ObreroDay({ viewerId, links }: ObreroDayProps) {
       const mark = await markAttendance({ siteId: activeId });
       attendance.reloadSilently();
       setSuccess(
-        `Asistencia marcada (${formatUtcStamp(mark.checkIn)}). Queda en estado «Registrada» hasta que su capataz la apruebe.`,
+        `Asistencia marcada (${formatSedeStamp(mark.checkIn, sedeTimezone)}). Queda en estado «Registrada» hasta que su capataz la apruebe.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -83,7 +105,7 @@ export function ObreroDay({ viewerId, links }: ObreroDayProps) {
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        eyebrow="Mi día · hoy (UTC)"
+        eyebrow="Mi día · hoy"
         title={active === null ? 'Marcar mi asistencia' : `Hoy en ${active.name}`}
         description={`${formatUtcDateLong(today)}: marque su asistencia primero; abajo ve su estado de hoy.`}
       />
@@ -177,11 +199,11 @@ export function ObreroDay({ viewerId, links }: ObreroDayProps) {
               ) : null}
               {ownMark === null ? null : (
                 <p className="text-[0.8125rem]">
-                  Ingreso {formatUtcStamp(ownMark.checkIn)} · estado{' '}
+                  Ingreso {formatSedeStamp(ownMark.checkIn, sedeTimezone)} · estado{' '}
                   {attendanceStatusLabel(ownMark.status)}
                   {ownMark.checkOut === null
                     ? ''
-                    : ` · salida ${formatUtcStamp(ownMark.checkOut)}`}
+                    : ` · salida ${formatSedeStamp(ownMark.checkOut, sedeTimezone)}`}
                 </p>
               )}
             </CardContent>

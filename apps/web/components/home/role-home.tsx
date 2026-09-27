@@ -52,7 +52,7 @@ function NeutralDay({ links }: { readonly links: readonly HomeLink[] }) {
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        eyebrow="Inicio · hoy (UTC)"
+        eyebrow="Inicio · hoy"
         title="Tu día"
         description="Resumen temporal mientras cada rol recibe su portada. Sus pantallas habilitadas están abajo, con el mismo acceso de siempre."
       />
