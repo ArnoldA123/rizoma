@@ -35,13 +35,18 @@
 // is not the full §3.3/§3.4 table and it is not a cache: see
 // `PERMISSION_CACHE_TTL_MS` in `./access.guard.ts` for the revocation contract.
 
-/** Actions the demo matrix arbitrates. */
+/** Actions the demo matrix arbitrates.
+ *
+ * `appointment.attend` (P4-2a) is the medico-owned clinical move over its own
+ * agenda: confirm/attend/derive an appointment whose `professional_id` is the
+ * caller. The desk keeps `appointment.write`; `caja` holds neither. */
 export const ACTION_CODES = [
   'agenda.read',
   'patient.read',
   'patient.write',
   'episode.write',
   'appointment.write',
+  'appointment.attend',
   'invoice.issue',
   'attendance.mark',
   'attendance.approve',
@@ -83,12 +88,15 @@ function grants(...actions: ActionCode[]): Set<ActionCode> {
  * is absent from an action is denied by omission rather than by a missing key.
  */
 export const ROLE_PERMISSIONS: Record<RoleCode, Set<ActionCode>> = {
-  // Salud (§3.3).
+  // Salud (§3.3). `medico` confirms/attends only its own agenda
+  // (`appointment.attend` + the `professional_id` ownership check in
+  // `salud.service.ts`); the desk (`recepcion`) keeps the scheduling write.
+  // `caja` still issues invoices and reads nothing clinical.
   ti_admin: grants('agenda.read'),
   direccion: grants('agenda.read'),
-  medico: grants('agenda.read', 'patient.read', 'patient.write', 'episode.write'),
+  medico: grants('agenda.read', 'patient.read', 'patient.write', 'episode.write', 'appointment.attend'),
   enfermeria: grants('agenda.read', 'patient.read'),
-  recepcion: grants('agenda.read', 'patient.write', 'appointment.write'),
+  recepcion: grants('agenda.read', 'patient.write', 'appointment.write', 'appointment.attend'),
   caja: grants('invoice.issue'),
   auditor: grants('agenda.read', 'site.read'),
   // Construcción (§3.4): gerente works at company scope, jefe_obra at its own

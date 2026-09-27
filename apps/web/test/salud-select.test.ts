@@ -186,7 +186,7 @@ test('appointmentsOnUtcDate: agrupa por día UTC y ordena por hora de inicio', (
   );
 
   const counts = statusCounts(rows);
-  assert.deepEqual(counts, { scheduled: 4, checked_in: 0, in_care: 0, done: 0, no_show: 0 });
+  assert.deepEqual(counts, { scheduled: 4, confirmed: 0, checked_in: 0, in_care: 0, completed: 0, no_show: 0, cancelled: 0, derived: 0 });
   assert.equal(statusCounts([appointment({ status: '' })]).scheduled, 1);
 
   assert.deepEqual(utcDaysOf(rows), ['2026-09-25', '2026-09-26']);

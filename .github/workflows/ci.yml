@@ -154,7 +154,7 @@ jobs:
         env:
           PGPASSWORD: rizoma_demo_password
         run: |
-          for f in db/migrations/001_*.sql db/migrations/002_*.sql db/migrations/003_*.sql db/migrations/004_*.sql db/migrations/005_*.sql db/migrations/006_*.sql db/migrations/007_*.sql db/migrations/008_*.sql db/migrations/009_*.sql db/migrations/010_*.sql; do
+          for f in db/migrations/001_*.sql db/migrations/002_*.sql db/migrations/003_*.sql db/migrations/004_*.sql db/migrations/005_*.sql db/migrations/006_*.sql db/migrations/007_*.sql db/migrations/008_*.sql db/migrations/009_*.sql db/migrations/010_*.sql db/migrations/011_*.sql; do
             psql -h localhost -U rizoma -d rizoma -v ON_ERROR_STOP=1 -f "$f"
           done
 

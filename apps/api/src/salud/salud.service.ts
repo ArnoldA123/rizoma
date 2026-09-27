@@ -1033,10 +1033,93 @@ export async function closeEpisode(actor: ActorContext, episodeId: string): Prom
 
 // ============ appointments ============
 
-/** Appointment agenda scoped to the membership subtree, plus `?saved_view_id=`. */
+/**
+ * P4-2a: closed appointment machine (code mirror of the 011 catalog seed).
+ * The catalog (`state_transitions`, entity `appointment`) is the sole
+ * authority consulted through `assertTransition`; this map only separates a
+ * 400 (unknown target status) from a 403 (a listed status the caller may not
+ * set from the current one) and documents the machine next to its use cases:
+ *   scheduled → confirmed / cancelled / derived
+ *   confirmed → checked_in / no_show / cancelled
+ *   checked_in → in_care → completed
+ * `completed`, `no_show`, `cancelled` and `derived` are terminal.
+ * Rescheduling is NOT a transition: it keeps the status and only moves
+ * `starts_at` (from `scheduled` or `confirmed`), so the catalog holds no row
+ * for it.
+ */
+export const APPOINTMENT_TRANSITIONS: Record<string, readonly string[]> = {
+  scheduled: ['confirmed', 'cancelled', 'derived'],
+  confirmed: ['checked_in', 'no_show', 'cancelled'],
+  checked_in: ['in_care'],
+  in_care: ['completed'],
+};
+
+/** Every status the machine (and therefore a listing filter) may name. */
+export const APPOINTMENT_KNOWN_STATUSES: readonly string[] = [
+  'scheduled',
+  'confirmed',
+  'checked_in',
+  'in_care',
+  'completed',
+  'no_show',
+  'cancelled',
+  'derived',
+];
+
+/**
+ * Listing filter of the appointment agenda. `status` keeps one status,
+ * `excludeStatus` drops one. The reception queue (P4-2b) passes
+ * `excludeStatus: 'derived'`: a derived appointment left the agenda — it was
+ * handed to another service — so the desk no longer offers it for
+ * Confirmar/Atender/No-show/Reprogramar/Anular. Both are refused with 400
+ * when they name a status outside `APPOINTMENT_KNOWN_STATUSES`.
+ */
+export interface AppointmentListFilter {
+  readonly status?: string | null;
+  readonly excludeStatus?: string | null;
+}
+
+/** Validates one status filter term, or null when absent/blank. */
+function parseStatusFilter(
+  raw: string | null | undefined,
+  label: string,
+  traceId: string,
+): string | null {
+  if (raw === undefined || raw === null || raw.trim() === '') return null;
+  const status = raw.trim();
+  if (!APPOINTMENT_KNOWN_STATUSES.includes(status)) {
+    throw badRequest(
+      `Invalid ${label} (expected one of ${APPOINTMENT_KNOWN_STATUSES.join('|')}): ${status}`,
+      traceId,
+    );
+  }
+  return status;
+}
+
+/** Appends the `status` / `excludeStatus` terms to an agenda query. */
+function applyAppointmentFilter(
+  conditions: string[],
+  values: unknown[],
+  filter: AppointmentListFilter,
+  traceId: string,
+): void {
+  const status = parseStatusFilter(filter.status, 'status', traceId);
+  const excludeStatus = parseStatusFilter(filter.excludeStatus, 'excludeStatus', traceId);
+  if (status !== null) {
+    values.push(status);
+    conditions.push(`status = $${values.length}`);
+  }
+  if (excludeStatus !== null) {
+    values.push(excludeStatus);
+    conditions.push(`status <> $${values.length}`);
+  }
+}
+
+/** Appointment agenda scoped to the membership subtree, plus `?saved_view_id=` and the P4-2a status filter. */
 export async function listAppointments(
   actor: ActorContext,
   savedViewId?: string | null,
+  filter: AppointmentListFilter = {},
 ): Promise<AppointmentRecord[]> {
   const facts = await loadFacts(actor);
   await authorize(actor, facts, {
@@ -1049,12 +1132,18 @@ export async function listAppointments(
     savedViewId === undefined || savedViewId === null || savedViewId === ''
       ? null
       : await resolveSavedViewForList(actor, savedViewId, 'appointments');
-  if (extra === null) {
-    const result = await actor.client.query(LIST_APPOINTMENTS_SQL, [actor.tenantId, [...facts.scopeSubtree]]);
-    return readRows(result).map(mapAppointment);
-  }
   const conditions = ['tenant_id = $1', 'org_node_id = ANY($2::uuid[])'];
   const values: unknown[] = [actor.tenantId, [...facts.scopeSubtree]];
+  applyAppointmentFilter(conditions, values, filter, actor.traceId);
+  if (extra === null) {
+    const result = await actor.client.query(
+      `SELECT ${APPOINTMENT_COLUMNS} FROM appointments ` +
+        `WHERE ${conditions.join(' AND ')} ` +
+        `ORDER BY starts_at DESC LIMIT ${SALUD_LIST_LIMIT}`,
+      values,
+    );
+    return readRows(result).map(mapAppointment);
+  }
   const { clauses, values: viewValues } = buildSavedViewConditions(
     'appointments',
     extra.filters,
@@ -1085,7 +1174,7 @@ export async function listAppointments(
  */
 export async function listAppointmentsPage(
   actor: ActorContext,
-  options: SaludPageInput & { savedViewId?: string | null } = {},
+  options: SaludPageInput & { savedViewId?: string | null } & AppointmentListFilter = {},
 ): Promise<SaludPage<AppointmentRecord>> {
   const limit = parsePageLimit(options.limit, actor.traceId);
   const facts = await loadFacts(actor);
@@ -1127,6 +1216,8 @@ export async function listAppointmentsPage(
     conditions.push(...clauses);
     values.push(...viewValues);
   }
+  // P4-2a: the reception queue (P4-2b) pages with `excludeStatus: 'derived'`.
+  applyAppointmentFilter(conditions, values, options, actor.traceId);
   if (cursorStartsAt !== null && cursorId !== null) {
     values.push(cursorStartsAt, cursorId);
     const startsAtParam = values.length - 1;
@@ -1253,4 +1344,245 @@ export async function getAppointment(
     attemptedAction: 'appointment.open',
   });
   return appointment;
+}
+
+// ============ appointment transitions (P4-2a) ============
+
+const UPDATE_APPOINTMENT_STATUS_SQL = `UPDATE appointments
+SET status = $3
+WHERE tenant_id = $1 AND id = $2
+RETURNING ${APPOINTMENT_COLUMNS}`;
+
+const RESCHEDULE_APPOINTMENT_SQL = `UPDATE appointments
+SET starts_at = $3, duration_min = $4
+WHERE tenant_id = $1 AND id = $2
+RETURNING ${APPOINTMENT_COLUMNS}`;
+
+/** Loads one appointment within the tenant; null means invisible/nonexistent. */
+async function findAppointment(
+  actor: ActorContext,
+  appointmentId: string,
+): Promise<AppointmentRecord | null> {
+  const result = await actor.client.query(SELECT_APPOINTMENT_SQL, [actor.tenantId, appointmentId]);
+  const row = readRows(result)[0];
+  return row === undefined ? null : mapAppointment(row);
+}
+
+/**
+ * Guard for every appointment mutation (P4-2a, least privilege):
+ * - `recepcion` (and any holder of `appointment.write`) moves any appointment
+ *   in its subtree;
+ * - `medico` moves only its own agenda (`appointment.attend` + the row's
+ *   `professional_id` is the caller) — confirm its visits, attend them,
+ *   derive them;
+ * - everybody else (`caja` as today, `enfermeria`, a medico over somebody
+ *   else's agenda) is denied and the denial is audited.
+ *
+ * The returned membership feeds the write audit; a denial throws the typed
+ * 403 before any SQL write runs.
+ */
+async function authorizeAppointmentMutation(
+  actor: ActorContext,
+  facts: ActorFacts,
+  appointment: AppointmentRecord,
+  attemptedAction: string,
+  stateAllows: boolean,
+): Promise<MembershipRecord> {
+  const role = facts.membership?.role ?? '';
+  const owns =
+    appointment.professionalId !== '' && appointment.professionalId === actor.userId;
+  const scheduler = rolePermitsAction(role, 'appointment.write');
+  const attendingOwn = owns && rolePermitsAction(role, 'appointment.attend');
+  return authorize(actor, facts, {
+    action: scheduler ? 'appointment.write' : 'appointment.attend',
+    entity: 'appointment',
+    entityId: appointment.id,
+    orgNodeId: appointment.orgNodeId,
+    stateAllows: stateAllows && (scheduler || attendingOwn),
+    attemptedAction,
+  });
+}
+
+/**
+ * Applies one closed-machine move: the catalog (`state_transitions`, entity
+ * `appointment`, migration 011) is the sole authority over the transition —
+ * an unlisted (from, to) triple, or a role outside its grant, denies with
+ * 403 — and every accepted move appends one `audit_log` row.
+ */
+async function changeAppointmentStatus(
+  actor: ActorContext,
+  appointment: AppointmentRecord,
+  to: string,
+  auditAction: string,
+): Promise<AppointmentRecord> {
+  const facts = await loadFacts(actor);
+  const transitionAllows = await assertTransition(actor.client, {
+    entity: 'appointment',
+    from: appointment.status,
+    to,
+    role: facts.membership?.role ?? '',
+    tenantId: actor.tenantId,
+  });
+  // One guard pass (same shape as `closeEpisode`): the denial — wrong role,
+  // somebody else's agenda, or a move the catalog does not list — is audited
+  // as `access.denied` and surfaces the typed 403.
+  const membership = await authorizeAppointmentMutation(
+    actor,
+    facts,
+    appointment,
+    auditAction === 'appointment.derived' ? 'appointment.derive' : 'appointment.status',
+    transitionAllows,
+  );
+  const result = await actor.client.query(UPDATE_APPOINTMENT_STATUS_SQL, [
+    actor.tenantId,
+    appointment.id,
+    to,
+  ]);
+  const row = readRows(result)[0];
+  if (row === undefined) {
+    throw new HttpException({ code: 'write.failed', message: 'Appointment status update returned no row', traceId: actor.traceId }, 500);
+  }
+  const updated = mapAppointment(row);
+  await writeAudit(actor, membership, {
+    action: auditAction,
+    entity: 'appointment',
+    entityId: updated.id,
+    orgNodeId: updated.orgNodeId,
+    diff: { from: appointment.status, to: updated.status },
+  });
+  return updated;
+}
+
+/**
+ * `PATCH /v1/salud/appointments/:id/status` — one move of the closed machine.
+ * A status outside the catalog is a 400; a listed status the caller may not
+ * set from the current one (or over somebody else's agenda) is a 403. A move
+ * onto the current status is idempotent and returns the row untouched.
+ */
+export async function updateAppointmentStatus(
+  actor: ActorContext,
+  appointmentId: string,
+  status: unknown,
+): Promise<AppointmentRecord> {
+  if (!UUID_RE.test(appointmentId)) throw badRequest('Invalid appointment id', actor.traceId);
+  const target = typeof status === 'string' ? status.trim() : '';
+  if (!APPOINTMENT_KNOWN_STATUSES.includes(target)) {
+    throw badRequest(
+      `Invalid status (expected one of ${APPOINTMENT_KNOWN_STATUSES.join('|')}): ${String(status)}`,
+      actor.traceId,
+    );
+  }
+  const appointment = await findAppointment(actor, appointmentId);
+  if (appointment === null) throw notFound('appointment', actor.traceId);
+  if (appointment.status === target) return appointment;
+  return changeAppointmentStatus(actor, appointment, target, 'appointment.status_changed');
+}
+
+/**
+ * P4-3 hook: schedules the 24h reminder of a confirmed appointment.
+ * No-op until P4-3 wires the BullMQ deferred notice; `createAppointment`
+ * keeps its best-effort `appointment.scheduled` notice, and rescheduling
+ * cancels the deferred one through `tryCancelAppointmentReminder` below.
+ * The new notice for the moved `startsAt` is P4-3's job, not this slice's.
+ */
+export async function tryScheduleReminder(
+  _actor: ActorContext,
+  _appointment: AppointmentRecord,
+): Promise<void> {
+  return undefined;
+}
+
+/**
+ * P4-3 hook: cancels the deferred 24h notice of an appointment that is being
+ * rescheduled (or moved out of `confirmed`). No-op until P4-3 owns the
+ * BullMQ queue; kept as a named call-site so the wiring has one place to land.
+ */
+export async function tryCancelAppointmentReminder(
+  _actor: ActorContext,
+  _appointment: AppointmentRecord,
+): Promise<void> {
+  return undefined;
+}
+
+/**
+ * `PATCH /v1/salud/appointments/:id/reschedule` — moves `startsAt` (and
+ * optionally `durationMin`) while keeping the status. Allowed only from
+ * `scheduled` or `confirmed`: reprogramming a visit already in care, done or
+ * derived is refused. Cancels the deferred notice when one exists (P4-3
+ * hook, no-op today) and audits `appointment.rescheduled` with the old/new
+ * instants.
+ */
+export async function rescheduleAppointment(
+  actor: ActorContext,
+  appointmentId: string,
+  body: unknown,
+): Promise<AppointmentRecord> {
+  if (!UUID_RE.test(appointmentId)) throw badRequest('Invalid appointment id', actor.traceId);
+  const record = asRecord(body);
+  const startsAt = readString(record.startsAt)?.trim();
+  if (startsAt === undefined || startsAt === '' || Number.isNaN(Date.parse(startsAt))) {
+    throw badRequest('startsAt must be an ISO datetime', actor.traceId);
+  }
+  let durationMin: number | undefined;
+  if (record.durationMin !== undefined) {
+    if (typeof record.durationMin !== 'number' || !Number.isInteger(record.durationMin) || record.durationMin <= 0) {
+      throw badRequest('durationMin must be a positive integer', actor.traceId);
+    }
+    durationMin = record.durationMin;
+  }
+  const appointment = await findAppointment(actor, appointmentId);
+  if (appointment === null) throw notFound('appointment', actor.traceId);
+  const facts = await loadFacts(actor);
+  // A reschedule keeps the status, so the catalog holds no row for it: the
+  // state term is the code-side allowlist (`scheduled` / `confirmed`), while
+  // the role term reuses the mutation guard (desk or owning medico).
+  const membership = await authorizeAppointmentMutation(
+    actor,
+    facts,
+    appointment,
+    'appointment.reschedule',
+    appointment.status === 'scheduled' || appointment.status === 'confirmed',
+  );
+  const result = await actor.client.query(RESCHEDULE_APPOINTMENT_SQL, [
+    actor.tenantId,
+    appointment.id,
+    startsAt,
+    durationMin ?? appointment.durationMin,
+  ]);
+  const row = readRows(result)[0];
+  if (row === undefined) {
+    throw new HttpException({ code: 'write.failed', message: 'Appointment reschedule returned no row', traceId: actor.traceId }, 500);
+  }
+  const updated = mapAppointment(row);
+  // The moved visit keeps its slot notice lifecycle: drop the deferred one
+  // (P4-3 owns the queue; the fresh notice for the new `startsAt` is P4-3's).
+  await tryCancelAppointmentReminder(actor, appointment);
+  await writeAudit(actor, membership, {
+    action: 'appointment.rescheduled',
+    entity: 'appointment',
+    entityId: updated.id,
+    orgNodeId: updated.orgNodeId,
+    diff: { from: appointment.startsAt, to: updated.startsAt, durationMin: updated.durationMin },
+  });
+  return updated;
+}
+
+/**
+ * `POST /v1/salud/appointments/:id/derive` — hands the visit to another
+ * service: `scheduled → derived` (the only outgoing move of a derivation)
+ * plus one `appointment.derived` audit row. Only the owning medico
+ * (`appointment.attend` over its own `professional_id`, backed by
+ * `episode.write`) may derive — a derivation is a clinical act, so the desk
+ * and `caja` are denied as today. The reception queue filters `derived` out
+ * (see `AppointmentListFilter`), and the web consumes that filter in P4-2b.
+ */
+export async function deriveAppointment(
+  actor: ActorContext,
+  appointmentId: string,
+): Promise<AppointmentRecord> {
+  if (!UUID_RE.test(appointmentId)) throw badRequest('Invalid appointment id', actor.traceId);
+  const appointment = await findAppointment(actor, appointmentId);
+  if (appointment === null) throw notFound('appointment', actor.traceId);
+  if (appointment.status === 'derived') return appointment;
+  return changeAppointmentStatus(actor, appointment, 'derived', 'appointment.derived');
 }

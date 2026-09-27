@@ -92,10 +92,13 @@ export function documentTypeLabel(type: string): string {
 /** `appointments.status`, in the order the state machine advances. */
 export const APPOINTMENT_STATUS_LABELS: Record<AppointmentStatus, string> = {
   scheduled: 'Programada',
+  confirmed: 'Confirmada',
   checked_in: 'En espera',
   in_care: 'En atención',
-  done: 'Atendida',
+  completed: 'Atendida',
   no_show: 'No asistió',
+  cancelled: 'Anulada',
+  derived: 'Derivada',
 };
 
 /** `episodes.status`: the two states the UI can produce, plus the reserved one. */
@@ -131,9 +134,9 @@ export function appointmentStatusLabel(status: string): string {
 export function appointmentStatusVariant(
   status: string,
 ): 'neutral' | 'outline' | 'accent' | 'tinted' | 'danger' {
-  if (status === 'done') return 'tinted';
+  if (status === 'completed') return 'tinted';
   if (status === 'in_care' || status === 'checked_in') return 'accent';
-  if (status === 'no_show') return 'danger';
+  if (status === 'no_show' || status === 'cancelled') return 'danger';
   return 'outline';
 }
 

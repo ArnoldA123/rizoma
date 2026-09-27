@@ -35,8 +35,8 @@ describe('role matrix shape', () => {
     assert.deepEqual(Object.keys(ROLE_PERMISSIONS).sort(), [...ROLE_CODES].sort());
   });
 
-  it('declares exactly the twelve demo actions, with no duplicates', () => {
-    assert.equal(ACTION_CODES.length, 12);
+  it('declares exactly the thirteen demo actions, with no duplicates', () => {
+    assert.equal(ACTION_CODES.length, 13);
     assert.equal(new Set(ACTION_CODES).size, ACTION_CODES.length);
   });
 
