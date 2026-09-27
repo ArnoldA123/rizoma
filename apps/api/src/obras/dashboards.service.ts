@@ -166,17 +166,74 @@ function isCalendarDate(value: string): boolean {
 }
 
 /**
- * Today in UTC. The SQL filter is the authority; this value is the label the
- * board echoes back, so a caller that omits `?date=` still sees which day it
- * read. The replica/cache layer will own the tenant timezone.
+ * Fallback sede zone (P4-1a): mirrors the `org_nodes.timezone` default of
+ * migration 010. The API keeps its own constant so the runtime has no
+ * cross-package import; the value must stay `America/Lima` on both sides.
  */
-function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
+export const ORG_DEFAULT_TIMEZONE = 'America/Lima';
+
+/** True when `value` is a usable IANA timezone (backed by `Intl`). */
+export function isValidIanaTimezone(value: unknown): boolean {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function parseDate(raw: string | undefined, traceId: string): string {
+/** Usable zone of one org node, or the Lima fallback (never throws). */
+export function normalizeOrgTimezone(value: unknown): string {
+  return isValidIanaTimezone(value) ? (value as string) : ORG_DEFAULT_TIMEZONE;
+}
+
+/**
+ * `YYYY-MM-DD` of `now` in `timezone`: the sede day, never the UTC day.
+ * Assembled from `formatToParts` so no locale date order leaks into the label.
+ */
+export function todayInTimezone(timezone: string, now: Date = new Date()): string {
+  const zone = normalizeOrgTimezone(timezone);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+const SELECT_ORG_TIMEZONE_SQL =
+  'SELECT timezone FROM org_nodes WHERE tenant_id = $1 AND id = $2 LIMIT 1';
+
+/**
+ * Zone of one org node for the default board day. An unknown node, a missing
+ * column (pre-010 database) or an unusable stored value all read as Lima —
+ * the board never turns a zone lookup into a 500.
+ */
+async function loadOrgTimezone(
+  client: ObraClient,
+  tenantId: string,
+  orgNodeId: string,
+): Promise<string> {
+  try {
+    const result = await client.query(SELECT_ORG_TIMEZONE_SQL, [tenantId, orgNodeId]);
+    return normalizeOrgTimezone(readRows(result)[0]?.timezone);
+  } catch {
+    return ORG_DEFAULT_TIMEZONE;
+  }
+}
+
+/**
+ * Explicit `?date=` (calendar-checked) or null when omitted. A null date
+ * resolves to today in the board scope's sede zone — never UTC — once the
+ * scope is known, so callers validate the format before any access check
+ * exactly like before.
+ */
+function parseExplicitDate(raw: string | undefined, traceId: string): string | null {
   const value = raw?.trim() ?? '';
-  if (value === '') return todayIsoDate();
+  if (value === '') return null;
   if (!isCalendarDate(value)) {
     throw badRequest('date must be a real YYYY-MM-DD date', traceId);
   }
@@ -678,8 +735,11 @@ export async function getSiteBoard(
   cache?: BoardCacheClient | null,
 ): Promise<SiteBoard> {
   if (!UUID_RE.test(siteId?.trim() ?? '')) throw badRequest('Invalid site id', actor.traceId);
-  const boardDate = parseDate(date, actor.traceId);
+  const explicitDate = parseExplicitDate(date, actor.traceId);
   const site: SiteRecord = await requireSiteAccess(actor, actor.userId, siteId.trim());
+  const boardDate =
+    explicitDate ??
+    todayInTimezone(await loadOrgTimezone(actor.client, actor.tenantId, site.orgNodeId));
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, site.orgNodeId);
   const key = obrasSiteBoardKey(actor.tenantId, site.id, boardDate);
   return withBoardCache(cache, key, OBRAS_BOARD_TTL_SECONDS, () =>
@@ -703,8 +763,11 @@ export async function getComparedSiteBoard(
 ): Promise<ComparedSiteBoard> {
   parseCompare(compare, actor.traceId);
   if (!UUID_RE.test(siteId?.trim() ?? '')) throw badRequest('Invalid site id', actor.traceId);
-  const boardDate = parseDate(date, actor.traceId);
+  const explicitDate = parseExplicitDate(date, actor.traceId);
   const site: SiteRecord = await requireSiteAccess(actor, actor.userId, siteId.trim());
+  const boardDate =
+    explicitDate ??
+    todayInTimezone(await loadOrgTimezone(actor.client, actor.tenantId, site.orgNodeId));
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, site.orgNodeId);
   const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
   const key = obrasSiteComparedBoardKey(actor.tenantId, site.id, boardDate);
@@ -759,7 +822,7 @@ interface CompanySnapshot {
  */
 async function readCompanyBoard(
   actor: ObraActorContext,
-  boardDate: string,
+  boardDate: string | null,
   cache?: BoardCacheClient | null,
 ): Promise<CompanyBoard> {
   const facts = await loadFacts(actor);
@@ -769,9 +832,14 @@ async function readCompanyBoard(
     orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
     attemptedAction: 'board.company',
   });
+  // The company KPIs aggregate the membership subtree, so an omitted date is
+  // today in the membership sede's zone — Lima when it has no usable zone.
+  const resolvedDate =
+    boardDate ??
+    todayInTimezone(await loadOrgTimezone(actor.client, actor.tenantId, membership.orgNodeId));
   const scope = [...facts.scopeSubtree];
 
-  const key = obrasCompanyBoardKey(actor.tenantId, membership.orgNodeId, boardDate);
+  const key = obrasCompanyBoardKey(actor.tenantId, membership.orgNodeId, resolvedDate);
   const snapshot = await withBoardCache<CompanySnapshot>(
     cache,
     key,
@@ -794,7 +862,7 @@ async function readCompanyBoard(
 
   return {
     orgNodeId: membership.orgNodeId,
-    date: boardDate,
+    date: resolvedDate,
     sites: {
       total: snapshot.total,
       active: snapshot.active,
@@ -826,7 +894,7 @@ export async function getCompanyBoard(
   date?: string,
   cache?: BoardCacheClient | null,
 ): Promise<CompanyBoard> {
-  return readCompanyBoard(actor, parseDate(date, actor.traceId), cache);
+  return readCompanyBoard(actor, parseExplicitDate(date, actor.traceId), cache);
 }
 
 /**
@@ -844,15 +912,15 @@ export async function getComparedCompanyBoard(
   cache?: BoardCacheClient | null,
 ): Promise<ComparedCompanyBoard> {
   parseCompare(compare, actor.traceId);
-  const boardDate = parseDate(date, actor.traceId);
-  const previousDate = shiftIsoDate(boardDate, -BOARD_COMPARE_DAYS);
+  const explicitDate = parseExplicitDate(date, actor.traceId);
   // The company org resolves through authorization inside `readCompanyBoard`,
   // so the `:prev7d` envelope key derives from the current leg (whose single
   // key is already warm by then). An envelope hit skips the previous leg;
   // a miss reads it and stores the envelope with the same TTL and fail-open
   // rule. No extra authorization runs: both legs keep their own audit row.
-  const current = await readCompanyBoard(actor, boardDate, cache);
-  const key = obrasCompanyComparedBoardKey(actor.tenantId, current.orgNodeId, boardDate);
+  const current = await readCompanyBoard(actor, explicitDate, cache);
+  const previousDate = shiftIsoDate(current.date, -BOARD_COMPARE_DAYS);
+  const key = obrasCompanyComparedBoardKey(actor.tenantId, current.orgNodeId, current.date);
   const cached = await getCachedBoard<ComparedCompanyBoard>(cache, key);
   if (cached !== null) return cached;
   const previous = await readCompanyBoard(actor, previousDate, cache);

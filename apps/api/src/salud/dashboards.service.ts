@@ -153,12 +153,63 @@ function isCalendarDate(value: string): boolean {
 }
 
 /**
- * Today in UTC. The SQL filter is the authority; this value is the label the
- * board echoes back, so a caller that omits `?date=` still sees which day it
- * read. The replica/cache layer will own the tenant timezone.
+ * Fallback sede zone (P4-1a): mirrors the `org_nodes.timezone` default of
+ * migration 010. The API keeps its own constant so the runtime has no
+ * cross-package import; the value must stay `America/Lima` on both sides.
  */
-function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
+export const ORG_DEFAULT_TIMEZONE = 'America/Lima';
+
+/** True when `value` is a usable IANA timezone (backed by `Intl`). */
+export function isValidIanaTimezone(value: unknown): boolean {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Usable zone of one org node, or the Lima fallback (never throws). */
+export function normalizeOrgTimezone(value: unknown): string {
+  return isValidIanaTimezone(value) ? (value as string) : ORG_DEFAULT_TIMEZONE;
+}
+
+/**
+ * `YYYY-MM-DD` of `now` in `timezone`: the sede day, never the UTC day.
+ * Assembled from `formatToParts` so no locale date order leaks into the label.
+ */
+export function todayInTimezone(timezone: string, now: Date = new Date()): string {
+  const zone = normalizeOrgTimezone(timezone);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+const SELECT_ORG_TIMEZONE_SQL =
+  'SELECT timezone FROM org_nodes WHERE tenant_id = $1 AND id = $2 LIMIT 1';
+
+/**
+ * Zone of one org node for the default board day. An unknown node, a missing
+ * column (pre-010 database) or an unusable stored value all read as Lima —
+ * the board never turns a zone lookup into a 500.
+ */
+async function loadOrgTimezone(
+  client: SaludClient,
+  tenantId: string,
+  orgNodeId: string,
+): Promise<string> {
+  try {
+    const result = await client.query(SELECT_ORG_TIMEZONE_SQL, [tenantId, orgNodeId]);
+    return normalizeOrgTimezone(readRows(result)[0]?.timezone);
+  } catch {
+    return ORG_DEFAULT_TIMEZONE;
+  }
 }
 
 // ============ guard facts ============
@@ -381,13 +432,27 @@ function parseRole(role: string, traceId: string): DashboardRole {
   return role as DashboardRole;
 }
 
-function parseDate(raw: string | undefined, traceId: string): string {
+/**
+ * Board day: an explicit `?date=` wins unchanged (calendar-checked); an
+ * omitted date means today in the target sede's zone — Lima when the sede
+ * has no usable zone. The SQL filter stays the authority; this value is the
+ * label the board echoes back.
+ */
+async function resolveBoardDate(
+  client: SaludClient,
+  tenantId: string,
+  targetOrg: string,
+  raw: string | undefined,
+  traceId: string,
+): Promise<string> {
   const value = raw?.trim() ?? '';
-  if (value === '') return todayIsoDate();
-  if (!isCalendarDate(value)) {
-    throw dashboardError('dashboard.invalid_date', 'date must be a real YYYY-MM-DD date', 400, traceId);
+  if (value !== '') {
+    if (!isCalendarDate(value)) {
+      throw dashboardError('dashboard.invalid_date', 'date must be a real YYYY-MM-DD date', 400, traceId);
+    }
+    return value;
   }
-  return value;
+  return todayInTimezone(await loadOrgTimezone(client, tenantId, targetOrg));
 }
 
 function parseOrgNode(raw: string | undefined, fallback: string, traceId: string): string {
@@ -622,7 +687,7 @@ export async function getBoard(
   const facts = await loadFacts(actor);
   const fallbackOrg = facts.membership?.orgNodeId ?? actor.tenantId;
   const targetOrg = parseOrgNode(orgNodeId, fallbackOrg, actor.traceId);
-  const boardDate = parseDate(date, actor.traceId);
+  const boardDate = await resolveBoardDate(actor.client, actor.tenantId, targetOrg, date, actor.traceId);
 
   await authorizeBoard(actor, facts, boardRole, targetOrg);
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, targetOrg);
@@ -652,7 +717,7 @@ export async function getComparedBoard(
   const facts = await loadFacts(actor);
   const fallbackOrg = facts.membership?.orgNodeId ?? actor.tenantId;
   const targetOrg = parseOrgNode(orgNodeId, fallbackOrg, actor.traceId);
-  const boardDate = parseDate(date, actor.traceId);
+  const boardDate = await resolveBoardDate(actor.client, actor.tenantId, targetOrg, date, actor.traceId);
 
   await authorizeBoard(actor, facts, boardRole, targetOrg);
   const scope = await loadScopeSubtree(actor.client, actor.tenantId, targetOrg);

@@ -335,9 +335,30 @@ export interface OrgNodeRecord {
   kind: string;
   name: string;
   active: boolean;
+  /** IANA timezone of the sede (P4-1a, `org_nodes.timezone`); never empty. */
+  timezone: string;
 }
 
-const ORG_NODE_COLUMNS = 'id, tenant_id, parent_id, kind, name, active';
+/** Fallback sede zone (P4-1a): a node with no usable zone reads as Lima. */
+export const ORG_DEFAULT_TIMEZONE = 'America/Lima';
+
+/** True when `value` is a usable IANA timezone (backed by `Intl`). */
+export function isValidOrgTimezone(value: unknown): boolean {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Usable zone of one row, or the Lima fallback (never throws). */
+export function normalizeOrgTimezone(value: unknown): string {
+  return isValidOrgTimezone(value) ? (value as string) : ORG_DEFAULT_TIMEZONE;
+}
+
+const ORG_NODE_COLUMNS = 'id, tenant_id, parent_id, kind, name, active, timezone';
 
 function mapOrgNode(row: Record<string, unknown>): OrgNodeRecord {
   return {
@@ -346,6 +367,7 @@ function mapOrgNode(row: Record<string, unknown>): OrgNodeRecord {
     kind: readString(row.kind) ?? '',
     name: readString(row.name) ?? '',
     active: readBoolean(row.active),
+    timezone: normalizeOrgTimezone(row.timezone),
   };
 }
 
