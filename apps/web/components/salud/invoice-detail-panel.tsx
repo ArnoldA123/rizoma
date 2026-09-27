@@ -20,7 +20,8 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { FailurePanel, WriteResult } from '@/components/salud/states';
-import { formatPen, formatRate, formatUtcStamp } from '@/lib/format';
+import { formatPen, formatRate, formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import {
   billingDocumentTypeLabel,
   fiscalStatusLabel,
@@ -71,9 +72,14 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
   const [reverted, setReverted] = useState(false);
   const [pendingPayment, setPendingPayment] = useState<{ method: string; amount: number } | null>(null);
   const [pendingVoid, setPendingVoid] = useState(false);
+  // The invoice carries its sede: every stamp of this panel reads in it (P4-1c),
+  // Lima fallback while the tree answers.
+  const sede = useSedeTimezone(detail.data?.orgNodeId ?? null);
+  const sedeTimezone = sede.timezone;
   // Turno y cotización por fecha/estado y cliente: los ids del comprobante se
   // resuelven en el navegador contra las listas del alcance. Sin lectura
-  // auxiliar, la fila muestra el id corto.
+  // auxiliar, la fila muestra el id corto. Las etiquetas leen en la zona del
+  // comprobante, como el resto del panel.
   const [sessionLabels, setSessionLabels] = useState<ReadonlyMap<string, string>>(new Map());
   const [quoteLabels, setQuoteLabels] = useState<ReadonlyMap<string, string>>(new Map());
 
@@ -89,7 +95,7 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
             new Map(
               sessions.value.map((row) => [
                 row.id,
-                `${formatUtcStamp(row.openedAt)} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
+                `${formatSedeStamp(row.openedAt, sedeTimezone)} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
               ]),
             ),
           );
@@ -99,7 +105,7 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
             new Map(
               quotes.value.map((row) => [
                 row.id,
-                `${row.customerName} · ${formatPen(row.total)} · ${formatUtcStamp(row.createdAt)}`,
+                `${row.customerName} · ${formatPen(row.total)} · ${formatSedeStamp(row.createdAt, sedeTimezone)}`,
               ]),
             ),
           );
@@ -110,7 +116,7 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
       active = false;
       controller.abort();
     };
-  }, []);
+  }, [sedeTimezone]);
 
   useEffect(() => {
     if (!reverted) return;
@@ -223,7 +229,7 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
           </Badge>
           <span className="tabular text-xs text-muted-foreground">
             {billingDocumentTypeLabel(invoice.customerDocType)} {invoice.customerDocNumber} ·{' '}
-            {invoice.customerName} · {formatPen(invoice.total)} · {formatUtcStamp(invoice.issuedAt)}
+            {invoice.customerName} · {formatPen(invoice.total)} · {formatSedeStamp(invoice.issuedAt, sedeTimezone)}
           </span>
           <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
             id {invoice.id}
@@ -244,7 +250,7 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
           <AmountRow label={`IGV (${formatRate(invoice.igvRate)})`} value={formatPen(invoice.igvTotal)} />
           <AmountRow label="Total" value={formatPen(invoice.total)} strong />
           <AmountRow label="Saldo pendiente" value={formatPen(pending)} strong />
-          <AmountRow label="Emitido" value={formatUtcStamp(invoice.issuedAt)} />
+          <AmountRow label="Emitido" value={formatSedeStamp(invoice.issuedAt, sedeTimezone)} />
           <AmountRow
             label="Turno de caja"
             value={
@@ -310,7 +316,7 @@ export function InvoiceDetailPanel({ invoiceId, onUpdated, className }: InvoiceD
                   </span>
                   <span className="tabular text-xs text-muted-foreground">
                     {PAYMENT_STATUS_LABELS[payment.status] ?? payment.status} ·{' '}
-                    {formatUtcStamp(payment.paidAt)}
+                    {formatSedeStamp(payment.paidAt, sedeTimezone)}
                     {payment.externalRef === null ? '' : ` · ref ${payment.externalRef}`}
                   </span>
                 </li>

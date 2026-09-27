@@ -16,7 +16,8 @@ import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createTriage, listTriages } from '@/lib/salud-api';
 import { listUsers } from '@/lib/users-api';
-import { formatUtcDate, utcDateOf, utcTimeOf } from '@/lib/salud-time';
+import { formatSedeStamp } from '@/lib/salud-time';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 
 /**
  * Triage panel of the ficha 360 — insert-only vital signs (§2.3).
@@ -34,6 +35,11 @@ export interface TriagesPanelProps {
   readonly episodes: readonly EpisodeRecord[];
   /** `patient.write` — recording a triage requires it. */
   readonly canWrite: boolean;
+  /**
+   * Sede of the ficha (P4-1c): triages carry no sede of their own, so the
+   * caller lends it. Absent, the rows read in the Lima fallback.
+   */
+  readonly orgNodeId?: string | null;
   readonly className?: string;
 }
 
@@ -114,7 +120,10 @@ function vitalValueLabel(key: string): string {
   return VITAL_LABEL_BY_KEY[key] ?? key;
 }
 
-export function TriagesPanel({ patientId, episodes, canWrite, className }: TriagesPanelProps) {
+export function TriagesPanel({ patientId, episodes, canWrite, orgNodeId, className }: TriagesPanelProps) {
+  // Triages carry no sede of their own: the zone is the ficha's, Lima
+  // fallback when the panel is used without one.
+  const sede = useSedeTimezone(orgNodeId ?? null);
   const [triages, setTriages] = useState<TriageRecord[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [readFailure, setReadFailure] = useState<ApiFailure | null>(null);
@@ -263,7 +272,7 @@ export function TriagesPanel({ patientId, episodes, canWrite, className }: Triag
                     <span className="tabular text-[0.8125rem]">
                       {triage.at === null
                         ? 'sin hora registrada'
-                        : `${formatUtcDate(utcDateOf(triage.at) ?? '')} · ${utcTimeOf(triage.at)} UTC`}
+                        : formatSedeStamp(triage.at, sede.timezone)}
                     </span>
                     <div className="flex flex-wrap gap-1.5">
                       {Object.entries(triage.values).map(([key, value]) => (
