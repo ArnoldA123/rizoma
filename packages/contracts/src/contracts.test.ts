@@ -451,7 +451,8 @@ test('list envelopes accept the arrays the API returns for salud', () => {
 
 test('state catalogs reject an unknown status', () => {
   assert.equal(appointmentStatusSchema.safeParse('checked_in').success, true);
-  assert.equal(appointmentStatusSchema.safeParse('cancelled').success, false);
+  assert.equal(appointmentStatusSchema.safeParse('cancelled').success, true);
+  assert.equal(appointmentStatusSchema.safeParse('done').success, false);
 });
 
 test('recording catalog mirrors the four §2.6 types and the inclusive scope', () => {

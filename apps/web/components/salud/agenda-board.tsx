@@ -12,9 +12,19 @@ import { ViewSelector } from '@/components/views/view-selector';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { DEV_IDENTITY } from '@/lib/config';
 import { requestJson } from '@/lib/api-client';
-import { listPatients } from '@/lib/salud-api';
+import {
+  attendAppointment,
+  cancelAppointment,
+  confirmAppointment,
+  deriveAppointment,
+  listPatients,
+  markNoShow,
+  rescheduleAppointment,
+} from '@/lib/salud-api';
+import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { listUsers } from '@/lib/users-api';
 import { listOrgNodes } from '@/lib/org-api';
+import type { OrgNodeRecord } from '@rizoma/contracts';
 import { withSavedView } from '@/lib/views-api';
 import {
   appointmentStatusLabel,
@@ -24,17 +34,19 @@ import {
 import {
   agendaViewFor,
   appointmentsOfProfessional,
-  appointmentsOnUtcDate,
+  appointmentsOnSedeDate,
   statusCounts,
   type AgendaView,
 } from '@/lib/salud-select';
 import {
-  currentUtcDate,
+  currentSedeDate,
   formatElapsed,
   formatUtcDateLong,
-  isCurrentUtcDate,
+  isCurrentSedeDate,
+  normalizeSedeTimezone,
+  resolveSedeTimezone,
+  sedeTimeRange,
   shiftUtcDate,
-  utcTimeRange,
 } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
@@ -59,8 +71,9 @@ import { cn } from '@/lib/utils';
  *     endpoint hides other professionals' rows.
  *   - **Skeletons shaped like the row**, with the directional sweep, instead of a
  *     spinner: the day keeps its geometry while it loads.
- *   - **UTC everywhere.** The day filter, the navigation and the labels are UTC,
- *     which is what makes this screen agree with `?date=` on the dashboards.
+ *   - **Sede day everywhere.** The day filter, the navigation and the labels use
+ *     the sede day (org tree zone, Lima fallback), which is what makes this
+ *     screen agree with `?date=` on the dashboards.
  */
 export interface AgendaBoardProps {
   readonly role: string | null;
@@ -79,11 +92,16 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
   // reads the unfiltered scope. The id joins the resource key so a pick
   // refetches (and the 2-minute poll keeps polling the narrowed list).
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
+  // The reception queue filters `derived` out: a derived visit left the
+  // agenda, so the desk no longer offers it for Confirmar/Atender/No-show/
+  // Reprogramar/Anular. The key joins the resource key so switching views
+  // refetches instead of reusing the other queue's rows.
+  const excludeDerived = view === 'recepcion';
   const appointments = useResource<AppointmentRecord[]>(
-    `agenda:${savedViewId ?? ''}`,
-    (signal) => readAgenda(savedViewId, signal),
+    `agenda:${savedViewId ?? ''}:${excludeDerived ? 'sin-derivadas' : 'todas'}`,
+    (signal) => readAgenda(savedViewId, excludeDerived, signal),
   );
-  const [day, setDay] = useState<string>(() => currentUtcDate());
+  const [day, setDay] = useState<string>(() => currentSedeDate());
   const [focusOwn, setFocusOwn] = useState(view === 'medico');
   const [formOpen, setFormOpen] = useState(view === 'recepcion');
   const [now, setNow] = useState(() => Date.now());
@@ -94,6 +112,7 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
   const [patientNames, setPatientNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [sedeNames, setSedeNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -110,6 +129,7 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
         }
         if (sedes.status === 'fulfilled') {
           setSedeNames(new Map(sedes.value.map((row) => [row.id, row.name])));
+          setSedeNodes(sedes.value);
         }
       },
     );
@@ -144,11 +164,17 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
   }, []);
 
   const rows = appointments.data ?? [];
-  const dayRows = appointmentsOnUtcDate(rows, day);
+  const knownOrgNodeId = rows[0]?.orgNodeId ?? DEV_IDENTITY.orgNodeId;
+  // The sede travels as a parameter: resolved from the org tree against the
+  // first row's sede, Lima fallback when the read failed or has no zone.
+  const sedeTimezone =
+    sedeNodes.length === 0
+      ? normalizeSedeTimezone(null)
+      : resolveSedeTimezone(sedeNodes, knownOrgNodeId);
+  const dayRows = appointmentsOnSedeDate(rows, day, sedeTimezone);
   const visible =
     focusOwn && view === 'medico' ? appointmentsOfProfessional(dayRows, viewerId) : dayRows;
   const counts = statusCounts(dayRows);
-  const knownOrgNodeId = rows[0]?.orgNodeId ?? DEV_IDENTITY.orgNodeId;
 
   const handleCreated = useCallback(
     (appointment: AppointmentRecord) => {
@@ -157,18 +183,27 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
     [appointments],
   );
 
+  const handleUpdated = useCallback(
+    (updated: AppointmentRecord) => {
+      appointments.setData((current) =>
+        (current ?? []).map((row) => (row.id === updated.id ? updated : row)),
+      );
+    },
+    [appointments],
+  );
+
   return (
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardEyebrow>Agenda · día UTC</CardEyebrow>
+          <CardEyebrow>Agenda · día de la sede</CardEyebrow>
           <CardTitle as="h2" className="text-lg">
             {formatUtcDateLong(day)}
           </CardTitle>
           <CardDescription>
             Vista {viewLabel(view)} para {roleLabel(role)}. El filtro por día, la navegación y las
-            etiquetas usan UTC; la hora de la cita se escribe en hora local y se convierte una sola
-            vez al programarla.
+            etiquetas usan el día de la sede; la hora de la cita se escribe en hora local y se
+            convierte una sola vez al programarla.
           </CardDescription>
         </CardHeader>
 
@@ -183,12 +218,12 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
               Día anterior
             </Button>
             <Button
-              variant={isCurrentUtcDate(day) ? 'ghost' : 'outline'}
+              variant={isCurrentSedeDate(day, sedeTimezone) ? 'ghost' : 'outline'}
               size="sm"
-              onClick={() => setDay(currentUtcDate())}
-              disabled={isCurrentUtcDate(day)}
+              onClick={() => setDay(currentSedeDate(sedeTimezone))}
+              disabled={isCurrentSedeDate(day, sedeTimezone)}
             >
-              Hoy (UTC)
+              Hoy
             </Button>
             <Button variant="outline" size="sm" onClick={() => setDay(shiftUtcDate(day, 1))}>
               Día siguiente
@@ -243,6 +278,13 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
             </span>
           </div>
 
+          {view === 'recepcion' ? (
+            <p className="text-xs text-muted-foreground">
+              La cola de recepción excluye las citas derivadas: al derivarse salieron de la
+              agenda y ya no admiten Confirmar, Atender, No asistió, Reprogramar ni Anular.
+            </p>
+          ) : null}
+
           {view === 'medico' ? (
             <p className="text-xs text-muted-foreground">
               El foco en sus citas es una decisión de interfaz: el API devuelve la agenda de la sede a
@@ -284,31 +326,35 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
               {visible.map((appointment) => (
                 <li
                   key={appointment.id}
-                  className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3.5 last:border-b-0"
+                  className="flex flex-col gap-2 border-b border-border py-3.5 last:border-b-0"
                 >
-                  <div className="flex min-w-0 items-baseline gap-4">
-                    <span className="tabular w-28 shrink-0 text-[0.9375rem] font-medium">
-                      {utcTimeRange(appointment.startsAt, appointment.durationMin)}
-                    </span>
-                    <span className="flex min-w-0 flex-col gap-0.5">
-                      <span className="text-[0.8125rem]">
-                        {appointment.durationMin} min ·{' '}
-                        {patientNames.get(appointment.patientId) ?? 'Paciente sin nombre en el alcance'}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-baseline gap-4">
+                      <span className="tabular w-28 shrink-0 text-[0.9375rem] font-medium">
+                        {sedeTimeRange(appointment.startsAt, appointment.durationMin, sedeTimezone)}
                       </span>
-                      <span className="text-xs text-muted-foreground">
-                        {userNames.get(appointment.professionalId) ?? 'Profesional sin nombre en el alcance'}{' '}·{' '}
-                        {sedeNames.get(appointment.orgNodeId) ?? 'Sede sin nombre en el alcance'}
+                      <span className="flex min-w-0 flex-col gap-0.5">
+                        <span className="text-[0.8125rem]">
+                          {appointment.durationMin} min ·{' '}
+                          {patientNames.get(appointment.patientId) ?? 'Paciente sin nombre en el alcance'}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {userNames.get(appointment.professionalId) ?? 'Profesional sin nombre en el alcance'}{' '}·{' '}
+                          {sedeNames.get(appointment.orgNodeId) ?? 'Sede sin nombre en el alcance'}
+                        </span>
                       </span>
-                      <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                        cita {appointment.id.slice(0, 8)}… · pac{' '}
-                        {appointment.patientId.slice(0, 8)}… · prof{' '}
-                        {appointment.professionalId.slice(0, 8)}…
-                      </span>
-                    </span>
+                    </div>
+                    <Badge variant={appointmentStatusVariant(appointment.status)}>
+                      {appointmentStatusLabel(appointment.status)}
+                    </Badge>
                   </div>
-                  <Badge variant={appointmentStatusVariant(appointment.status)}>
-                    {appointmentStatusLabel(appointment.status)}
-                  </Badge>
+                  <AppointmentRowActions
+                    appointment={appointment}
+                    role={role}
+                    viewerId={viewerId}
+                    canWrite={canWrite}
+                    onUpdated={handleUpdated}
+                  />
                 </li>
               ))}
             </ul>
@@ -344,16 +390,17 @@ export function AgendaBoard({ role, viewerId, canWrite }: AgendaBoardProps) {
  * Reads the scope agenda through the proxy, narrowed by the active saved view.
  * Day filtering stays in the browser: the API offers no `?date=`, so the board
  * keeps reading the scope (now optionally narrowed) and slicing the day locally.
+ * The reception queue passes `?exclude_status=derived`: a derived visit left
+ * the agenda, so the desk never sees it as actionable.
  */
 async function readAgenda(
   savedViewId: string | null,
+  excludeDerived: boolean,
   signal: AbortSignal,
 ): Promise<AppointmentRecord[]> {
-  const rows = await requestJson(
-    withSavedView('/salud/appointments', savedViewId),
-    appointmentListSchema,
-    { signal },
-  );
+  let path = withSavedView('/salud/appointments', savedViewId);
+  if (excludeDerived) path += `${path.includes('?') ? '&' : '?'}exclude_status=derived`;
+  const rows = await requestJson(path, appointmentListSchema, { signal });
   return rows ?? [];
 }
 
@@ -361,6 +408,200 @@ function viewLabel(view: AgendaView): string {
   if (view === 'recepcion') return 'de recepción';
   if (view === 'medico') return 'del profesional';
   return 'de lectura';
+}
+
+/** Next clinical step of [Atender], one move of the closed machine per click. */
+const ATTEND_NEXT: Readonly<Record<string, 'checked_in' | 'in_care' | 'completed'>> = {
+  confirmed: 'checked_in',
+  checked_in: 'in_care',
+  in_care: 'completed',
+};
+
+type AppointmentAction = 'confirm' | 'attend' | 'no-show' | 'cancel' | 'derive' | 'reschedule';
+
+interface AppointmentRowActionsProps {
+  readonly appointment: AppointmentRecord;
+  readonly role: string | null;
+  readonly viewerId: string | null;
+  /** `appointment.write` — the desk moves any appointment of its subtree. */
+  readonly canWrite: boolean;
+  readonly onUpdated: (updated: AppointmentRecord) => void;
+}
+
+/**
+ * Per-row actions of the agenda (P4-2b). The API owns every guard: the board
+ * only shows or hides a button by status and role, and a refusal still
+ * surfaces as the typed denial. Every action takes two clicks — the button
+ * arms an inline confirmation, the second click runs it — so there are no
+ * heavy modals and no accidental move.
+ *
+ *   - `scheduled`: [Confirmar] (desk, or the owning physician), [Derivar]
+ *     (owning physician only) and [Anular] (desk);
+ *   - `confirmed`: [Atender] (owning physician, one machine step per click),
+ *     [No asistió], [Reprogramar] and [Anular] (desk);
+ *   - `checked_in` / `in_care`: [Atender] keeps advancing the owning
+ *     physician's visit; terminal states offer nothing.
+ */
+function AppointmentRowActions({
+  appointment,
+  role,
+  viewerId,
+  canWrite,
+  onUpdated,
+}: AppointmentRowActionsProps) {
+  const [pending, setPending] = useState<AppointmentAction | null>(null);
+  const [rescheduleValue, setRescheduleValue] = useState('');
+  const [rescheduleError, setRescheduleError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<ApiFailure | null>(null);
+
+  const isOwnMedico =
+    role === 'medico' && viewerId !== null && appointment.professionalId === viewerId;
+  const { status } = appointment;
+  const attendStep = ATTEND_NEXT[status];
+
+  const showConfirm = status === 'scheduled' && (canWrite || isOwnMedico);
+  const showDerive = status === 'scheduled' && isOwnMedico;
+  const showCancel = (status === 'scheduled' || status === 'confirmed') && canWrite;
+  const showAttend = attendStep !== undefined && isOwnMedico;
+  const showNoShow = status === 'confirmed' && canWrite;
+  const showReschedule = status === 'confirmed' && canWrite;
+
+  if (!showConfirm && !showDerive && !showCancel && !showAttend && !showNoShow && !showReschedule) {
+    return null;
+  }
+
+  async function run(action: AppointmentAction): Promise<void> {
+    setBusy(true);
+    setFailure(null);
+    try {
+      if (action === 'confirm') {
+        onUpdated(await confirmAppointment(appointment.id));
+      } else if (action === 'attend' && attendStep !== undefined) {
+        onUpdated(await attendAppointment(appointment.id, attendStep));
+      } else if (action === 'no-show') {
+        onUpdated(await markNoShow(appointment.id));
+      } else if (action === 'cancel') {
+        onUpdated(await cancelAppointment(appointment.id));
+      } else if (action === 'derive') {
+        onUpdated(await deriveAppointment(appointment.id));
+      } else if (action === 'reschedule') {
+        const parsed = Date.parse(rescheduleValue);
+        if (Number.isNaN(parsed)) {
+          setRescheduleError('Indique una fecha y hora válidas.');
+          return;
+        }
+        // One conversion: the `datetime-local` value is sede-local wall time
+        // and the API takes the UTC instant.
+        onUpdated(
+          await rescheduleAppointment(appointment.id, {
+            startsAt: new Date(parsed).toISOString(),
+          }),
+        );
+      }
+      setPending(null);
+      setRescheduleValue('');
+      setRescheduleError(null);
+    } catch (error) {
+      setFailure(classifyApiError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function actionButton(action: AppointmentAction, label: string) {
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={busy}
+        onClick={() => {
+          setFailure(null);
+          setRescheduleError(null);
+          setPending(action);
+        }}
+      >
+        {label}
+      </Button>
+    );
+  }
+
+  function confirmInline(action: AppointmentAction, question: string) {
+    return (
+      <span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>{question}</span>
+        <Button variant="primary" size="sm" disabled={busy} onClick={() => void run(action)}>
+          {busy ? 'Guardando…' : 'Sí, guardar'}
+        </Button>
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => setPending(null)}>
+          No, volver
+        </Button>
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {showConfirm ? actionButton('confirm', 'Confirmar') : null}
+        {showAttend ? actionButton('attend', 'Atender') : null}
+        {showNoShow ? actionButton('no-show', 'No asistió') : null}
+        {showReschedule ? actionButton('reschedule', 'Reprogramar') : null}
+        {showDerive ? actionButton('derive', 'Derivar') : null}
+        {showCancel ? actionButton('cancel', 'Anular') : null}
+      </div>
+
+      {pending === 'confirm' ? confirmInline('confirm', '¿Confirmar la cita?') : null}
+      {pending === 'attend' ? confirmInline('attend', '¿Avanzar la atención un paso?') : null}
+      {pending === 'no-show' ? confirmInline('no-show', '¿Registrar como no asistió?') : null}
+      {pending === 'cancel' ? confirmInline('cancel', '¿Anular la cita?') : null}
+      {pending === 'derive' ? confirmInline('derive', '¿Derivar la cita a otro servicio?') : null}
+      {pending === 'reschedule' ? (
+        <span className="flex flex-wrap items-center gap-2">
+          <label htmlFor={`reschedule-${appointment.id}`} className="text-xs text-muted-foreground">
+            Nueva fecha y hora (hora de la sede)
+          </label>
+          <Input
+            id={`reschedule-${appointment.id}`}
+            type="datetime-local"
+            className="w-56"
+            value={rescheduleValue}
+            disabled={busy}
+            onChange={(event) => {
+              setRescheduleValue(event.target.value);
+              setRescheduleError(null);
+            }}
+          />
+          <Button variant="primary" size="sm" disabled={busy} onClick={() => void run('reschedule')}>
+            {busy ? 'Guardando…' : 'Guardar'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              setPending(null);
+              setRescheduleValue('');
+              setRescheduleError(null);
+            }}
+          >
+            Cancelar
+          </Button>
+        </span>
+      ) : null}
+
+      {rescheduleError !== null ? (
+        <p role="alert" className="text-xs text-danger">
+          {rescheduleError}
+        </p>
+      ) : null}
+      {failure !== null ? (
+        <p role="alert" className="text-xs text-danger">
+          No se pudo guardar ({failure.code}). {failure.hint}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 /**

@@ -60,7 +60,7 @@ export const appointmentRecordSchema = z.object({
   professionalId: uuidSchema,
   startsAt: isoValueSchema,
   durationMin: z.number(),
-  /** `scheduled` on insert; later `checked_in` / `in_care` / `done` / `no_show`. */
+  /** `scheduled` on insert; the P4-2a machine owns the rest (see `APPOINTMENT_STATUSES`). */
   status: z.string(),
   createdAt: isoValueSchema,
 });
@@ -143,11 +143,27 @@ export const documentTypeSchema = z.enum(DOCUMENT_TYPES);
 export type DocumentType = z.infer<typeof documentTypeSchema>;
 
 /**
- * `appointments.status` lifecycle (§2.3). The insert state is `scheduled`; the
- * rest is the state machine the database owns, mirrored so the UI labels a row
- * without inventing a status.
+ * `appointments.status` lifecycle (migration 003 as widened by 011, P4-2a).
+ * The insert state is `scheduled`; the rest is the closed machine the
+ * `state_transitions` catalog owns, mirrored so the UI labels a row without
+ * inventing a status:
+ *   scheduled → confirmed / cancelled / derived
+ *   confirmed → checked_in / no_show / cancelled
+ *   checked_in → in_care → completed
+ * `completed`, `no_show`, `cancelled` and `derived` are terminal. The pre-P4
+ * `done` value is gone: it never existed in the database (003 always said
+ * `completed`) and parsing it now fails.
  */
-export const APPOINTMENT_STATUSES = ['scheduled', 'checked_in', 'in_care', 'done', 'no_show'] as const;
+export const APPOINTMENT_STATUSES = [
+  'scheduled',
+  'confirmed',
+  'checked_in',
+  'in_care',
+  'completed',
+  'no_show',
+  'cancelled',
+  'derived',
+] as const;
 export const appointmentStatusSchema = z.enum(APPOINTMENT_STATUSES);
 export type AppointmentStatus = z.infer<typeof appointmentStatusSchema>;
 
@@ -233,6 +249,28 @@ export const appointmentCreateInputSchema = z.object({
   durationMin: z.number().int().positive(),
 });
 export type AppointmentCreateInput = z.infer<typeof appointmentCreateInputSchema>;
+
+/**
+ * Body of `PATCH /v1/salud/appointments/:id/status` (P4-2a) — one move of the
+ * closed machine. The API answers 400 for a status outside the catalog and
+ * 403 for a listed status the caller may not set from the current one.
+ */
+export const appointmentStatusInputSchema = z.object({
+  status: appointmentStatusSchema,
+});
+export type AppointmentStatusInput = z.infer<typeof appointmentStatusInputSchema>;
+
+/**
+ * Body of `PATCH /v1/salud/appointments/:id/reschedule` (P4-2a) — moves
+ * `startsAt` (and optionally `durationMin`) while keeping the status.
+ * Allowed only from `scheduled` or `confirmed`.
+ */
+export const appointmentRescheduleInputSchema = z.object({
+  /** Offset-aware ISO-8601 instant; the API rejects an unparseable one. */
+  startsAt: isoDateTimeSchema,
+  durationMin: z.number().int().positive().optional(),
+});
+export type AppointmentRescheduleInput = z.infer<typeof appointmentRescheduleInputSchema>;
 
 /**
  * One `SI`/`NO` mark per recording type (plus the inclusive `todo`), with at
@@ -372,3 +410,19 @@ export const prescriptionCreateInputSchema = z.object({
   status: prescriptionStatusSchema.optional(),
 });
 export type PrescriptionCreateInput = z.infer<typeof prescriptionCreateInputSchema>;
+
+/**
+ * Target statuses of `PATCH /v1/salud/prescriptions/:id` (P4-2a): Emitir
+ * (`issued`) or Anular (`cancelled`), from `draft` of an `open` episode,
+ * by the `episode.write` role. The API answers 400 outside this pair and
+ * 403 for a move the catalog denies.
+ */
+export const PRESCRIPTION_TRANSITION_TARGETS = ['issued', 'cancelled'] as const;
+export const prescriptionTransitionSchema = z.enum(PRESCRIPTION_TRANSITION_TARGETS);
+export type PrescriptionTransition = z.infer<typeof prescriptionTransitionSchema>;
+
+/** Body of `PATCH /v1/salud/prescriptions/:id`. */
+export const prescriptionTransitionInputSchema = z.object({
+  status: prescriptionTransitionSchema,
+});
+export type PrescriptionTransitionInput = z.infer<typeof prescriptionTransitionInputSchema>;

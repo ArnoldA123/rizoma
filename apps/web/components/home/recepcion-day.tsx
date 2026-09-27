@@ -13,8 +13,10 @@ import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { appointmentStatusLabel } from '@/lib/labels';
 import { getSaludBoard, listAppointments, listPatients } from '@/lib/salud-api';
 import { listUsers } from '@/lib/users-api';
-import { appointmentsOnUtcDate } from '@/lib/salud-select';
-import { currentUtcDate, formatUtcDateLong, utcTimeRange } from '@/lib/salud-time';
+import { listOrgNodes } from '@/lib/org-api';
+import type { OrgNodeRecord } from '@rizoma/contracts';
+import { appointmentsOnSedeDate } from '@/lib/salud-select';
+import { currentSedeDate, formatUtcDateLong, resolveSedeTimezone, sedeTimeRange } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import type { HomeLink } from './role-home';
 
@@ -27,17 +29,41 @@ export interface RecepcionDayProps {
  *
  * Counts come from the recepción board (`todayAppointments`, `waitingAvgMin`,
  * `noShows`, `queue`); the rows below are the whole sede queue of today in
- * UTC, with patient and professional names resolved against the scope lists.
- * No identifier is rendered — names own the rows.
+ * the sede zone, with patient and professional names resolved against the
+ * scope lists. No identifier is rendered — names own the rows.
  */
 export function RecepcionDay({ links }: RecepcionDayProps) {
-  const today = currentUtcDate();
   const board = useResource('home-board:recepcion', (signal) =>
     getSaludBoard('recepcion', {}, signal),
   );
   const agenda = useResource('home-agenda:recepcion', (signal) => listAppointments(signal));
   const [patientNames, setPatientNames] = useState<ReadonlyMap<string, string>>(new Map());
   const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(new Map());
+  // The sede travels as a parameter: zone of the first agenda sede from the
+  // org tree, Lima fallback while the list loads or when the row has no zone.
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((nodes) => {
+        if (active) setSedeNodes(nodes);
+      })
+      .catch(() => {
+        if (active) setSedeNodes([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  const agendaRows = agenda.data ?? [];
+  const boardOrg =
+    board.data !== null && board.data.role === 'recepcion' ? board.data.orgNodeId : null;
+  const sedeTimezone = resolveSedeTimezone(sedeNodes, agendaRows[0]?.orgNodeId ?? boardOrg);
+  const today = currentSedeDate(sedeTimezone);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -60,12 +86,12 @@ export function RecepcionDay({ links }: RecepcionDayProps) {
 
   const recepcionBoard =
     board.data !== null && board.data.role === 'recepcion' ? board.data : null;
-  const dayRows = appointmentsOnUtcDate(agenda.data ?? [], today);
+  const dayRows = appointmentsOnSedeDate(agendaRows, today, sedeTimezone);
 
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        eyebrow="Recepción · hoy (UTC)"
+        eyebrow="Recepción · hoy"
         title="La cola de hoy"
         description={`${formatUtcDateLong(today)}: citas del día, espera promedio, inasistencias y cola, con nombre y hora por fila.`}
         action={
@@ -124,7 +150,7 @@ export function RecepcionDay({ links }: RecepcionDayProps) {
                 >
                   <div className="flex min-w-0 items-baseline gap-4">
                     <span className="tabular w-28 shrink-0 text-[0.9375rem] font-medium">
-                      {utcTimeRange(appointment.startsAt, appointment.durationMin)}
+                      {sedeTimeRange(appointment.startsAt, appointment.durationMin, sedeTimezone)}
                     </span>
                     <span className="flex min-w-0 flex-col gap-0.5">
                       <span className="text-[0.8125rem]">

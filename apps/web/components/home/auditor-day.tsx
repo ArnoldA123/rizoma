@@ -6,6 +6,7 @@ import {
   invoiceListSchema,
   type CompanyBoard,
   type InvoiceRecord,
+  type OrgNodeRecord,
   type SiteLogRecord,
   type SiteRecord,
   type StockMoveRecord,
@@ -18,10 +19,11 @@ import { SkeletonRows } from '@/components/ui/skeleton';
 import { IconArrowRight } from '@/components/ui/icons';
 import { EmptyState, FailurePanel } from '@/components/ui/states';
 import { requestJson } from '@/lib/api-client';
-import { formatPen, formatQuantity, formatUtcStamp } from '@/lib/format';
+import { formatPen, formatQuantity, formatSedeStamp } from '@/lib/format';
 import { getCompanyBoard, listInventoryItems, listSiteLogs, listSites, listStockMoves } from '@/lib/obras-api';
 import { listUsers } from '@/lib/users-api';
-import { currentUtcDate, formatUtcDateLong } from '@/lib/salud-time';
+import { listOrgNodes } from '@/lib/org-api';
+import { currentSedeDate, formatUtcDateLong, resolveSedeTimezone } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import type { HomeLink } from './role-home';
 
@@ -44,10 +46,31 @@ const LOG_SITES_LIMIT = 3;
  * exists. Names own every row — no identifier is rendered.
  */
 export function AuditorDay({ links }: AuditorDayProps) {
-  const today = currentUtcDate();
   const board = useResource<CompanyBoard>('home-board:auditor', (signal) =>
     getCompanyBoard(signal),
   );
+  // The sede travels as a parameter: first sede zone from the org tree, Lima
+  // fallback while the list loads or when the row has no zone.
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((nodes) => {
+        if (active) setSedeNodes(nodes);
+      })
+      .catch(() => {
+        if (active) setSedeNodes([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  const sedeTimezone = resolveSedeTimezone(sedeNodes);
+  const today = currentSedeDate(sedeTimezone);
   const sites = useResource<SiteRecord[]>('home-sites:auditor', (signal) =>
     listSites(signal),
   );
@@ -105,7 +128,7 @@ export function AuditorDay({ links }: AuditorDayProps) {
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        eyebrow="Auditoría · hoy (UTC)"
+        eyebrow="Auditoría · hoy"
         title="Tablero de la empresa"
         description={`${formatUtcDateLong(today)}: obras y avance agregado del alcance, más los movimientos recientes con nombre y fecha.`}
         action={
@@ -176,7 +199,7 @@ export function AuditorDay({ links }: AuditorDayProps) {
                     <span className="text-xs text-muted-foreground">
                       {siteNames.get(log.siteId) ?? 'Obra del alcance'} ·{' '}
                       {userNames.get(log.authorId) ?? 'Autor del alcance'} ·{' '}
-                      {formatUtcStamp(log.at)}
+                      {formatSedeStamp(log.at, sedeTimezone)}
                     </span>
                   </li>
                 ))}
@@ -219,7 +242,7 @@ export function AuditorDay({ links }: AuditorDayProps) {
                       {formatQuantity(move.qty)}
                     </span>
                     <span className="text-xs text-muted-foreground">
-                      {formatUtcStamp(move.at)} · {move.status}
+                      {formatSedeStamp(move.at, sedeTimezone)} · {move.status}
                     </span>
                   </li>
                 ))}
@@ -262,7 +285,7 @@ export function AuditorDay({ links }: AuditorDayProps) {
                     </span>
                     <span className="text-xs text-muted-foreground">
                       {invoice.serie}-{invoice.numero} · {invoice.status} ·{' '}
-                      {formatUtcStamp(invoice.issuedAt)}
+                      {formatSedeStamp(invoice.issuedAt, sedeTimezone)}
                     </span>
                   </li>
                 ))}

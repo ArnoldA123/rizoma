@@ -25,7 +25,8 @@ import { requestJson } from '@/lib/api-client';
 import { listCashSessions } from '@/lib/salud-api';
 import { withSavedView } from '@/lib/views-api';
 import { DEV_IDENTITY } from '@/lib/config';
-import { formatPen, formatUtcStamp } from '@/lib/format';
+import { formatPen, formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import {
   billingDocumentTypeLabel,
   fiscalStatusLabel,
@@ -106,6 +107,10 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [seed, setSeed] = useState<InvoiceDraftSeed | null>(null);
   const [cashSessionItems, setCashSessionItems] = useState<readonly EntityItem[]>([]);
+  // Invoices span the scope but carry only an orgNodeId each: the list reads
+  // in the zone of the open shift, Lima fallback meanwhile (P4-1d respaldo
+  // Lima cuando no hay turno abierto).
+  const sede = useSedeTimezone(session?.orgNodeId ?? null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -360,7 +365,7 @@ export function CajaBoard({ role, className }: CajaBoardProps) {
                     </div>
                     <span className="tabular text-xs text-muted-foreground">
                       {billingDocumentTypeLabel(invoice.customerDocType)} {invoice.customerDocNumber} ·{' '}
-                      {formatPen(invoice.total)} · {formatUtcStamp(invoice.issuedAt)}
+                      {formatPen(invoice.total)} · {formatSedeStamp(invoice.issuedAt, sede.timezone)}
                     </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
                       id {invoice.id}

@@ -8,9 +8,12 @@ import { buttonVariants } from '@/components/ui/button';
 import { SkeletonRows } from '@/components/ui/skeleton';
 import { IconArrowRight } from '@/components/ui/icons';
 import { FailurePanel } from '@/components/salud/states';
-import { formatPen, formatUtcStamp } from '@/lib/format';
+import { formatPen, formatSedeStamp } from '@/lib/format';
 import { getSaludBoard } from '@/lib/salud-api';
-import { currentUtcDate, formatUtcDateLong } from '@/lib/salud-time';
+import { listOrgNodes } from '@/lib/org-api';
+import type { OrgNodeRecord } from '@rizoma/contracts';
+import { useEffect, useState } from 'react';
+import { currentSedeDate, formatUtcDateLong, resolveSedeTimezone } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import type { HomeLink } from './role-home';
 
@@ -27,15 +30,37 @@ export interface CajaDayProps {
  * field, so this cover names none.
  */
 export function CajaDay({ links }: CajaDayProps) {
-  const today = currentUtcDate();
   const board = useResource('home-board:caja', (signal) => getSaludBoard('caja', {}, signal));
+  // The sede travels as a parameter: zone of the board's sede from the org
+  // tree, Lima fallback while the list loads or when the row has no zone.
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((nodes) => {
+        if (active) setSedeNodes(nodes);
+      })
+      .catch(() => {
+        if (active) setSedeNodes([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  const boardOrg = board.data !== null && board.data.role === 'caja' ? board.data.orgNodeId : null;
+  const sedeTimezone = resolveSedeTimezone(sedeNodes, boardOrg);
+  const today = currentSedeDate(sedeTimezone);
 
   const cajaBoard = board.data !== null && board.data.role === 'caja' ? board.data : null;
 
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        eyebrow="Caja · hoy (UTC)"
+        eyebrow="Caja · hoy"
         title="Su turno de hoy"
         description={`${formatUtcDateLong(today)}: turno abierto, cobrado del día, comprobantes emitidos y pendientes fiscales.`}
         action={
@@ -67,7 +92,7 @@ export function CajaDay({ links }: CajaDayProps) {
               <CardDescription>
                 {cajaBoard.openSession === null
                   ? 'No hay un turno abierto en la sede: emitir un comprobante responderá con turno cerrado.'
-                  : `Abierto el ${formatUtcStamp(cajaBoard.openSession.openedAt)} · estado abierto. El turno se gestiona desde la pantalla de caja.`}
+                  : `Abierto el ${formatSedeStamp(cajaBoard.openSession.openedAt, sedeTimezone)} · estado abierto. El turno se gestiona desde la pantalla de caja.`}
               </CardDescription>
             </CardHeader>
           </Card>

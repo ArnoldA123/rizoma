@@ -15,7 +15,7 @@ import {
   type EpisodeRecord,
   type InvoiceRecord,
 } from '@rizoma/contracts';
-import { utcDateOf } from './salud-time.ts';
+import { sedeDateOf, utcDateOf } from './salud-time.ts';
 
 /** Rows per page of the patient list and the agenda. */
 export const PAGE_SIZE = 10;
@@ -95,6 +95,34 @@ export function appointmentsOnUtcDate(
   return appointments
     .filter((appointment) => utcDateOf(appointment.startsAt) === date)
     .sort((left, right) => (left.startsAt ?? '').localeCompare(right.startsAt ?? ''));
+}
+
+/**
+ * Appointments whose sede day equals `date`, in start order. The sede
+ * travels as a parameter: callers resolve it with `listOrgNodes` (Lima
+ * fallback) and pass it down, so the rows agree with the sede day.
+ */
+export function appointmentsOnSedeDate(
+  appointments: readonly AppointmentRecord[],
+  date: string,
+  timezone?: string | null,
+): readonly AppointmentRecord[] {
+  return appointments
+    .filter((appointment) => sedeDateOf(appointment.startsAt, timezone) === date)
+    .sort((left, right) => (left.startsAt ?? '').localeCompare(right.startsAt ?? ''));
+}
+
+/** Distinct sede days present in a list, ascending. */
+export function sedeDaysOf(
+  appointments: readonly AppointmentRecord[],
+  timezone?: string | null,
+): readonly string[] {
+  const days = new Set<string>();
+  for (const appointment of appointments) {
+    const day = sedeDateOf(appointment.startsAt, timezone);
+    if (day !== null) days.add(day);
+  }
+  return [...days].sort();
 }
 
 /** Split of a day into the states the agenda legend renders. */

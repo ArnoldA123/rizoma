@@ -32,12 +32,14 @@ import {
 } from '@/lib/salud-board-cache';
 import { saveTextFile } from '@/lib/salud-download';
 import {
-  currentUtcDate,
+  currentSedeDate,
   formatElapsed,
   formatUtcDateLong,
-  isCurrentUtcDate,
+  isCurrentSedeDate,
+  resolveSedeTimezone,
   shiftUtcDate,
 } from '@/lib/salud-time';
+import type { OrgNodeRecord } from '@rizoma/contracts';
 import { useResource } from '@/lib/use-resource';
 import { cn } from '@/lib/utils';
 
@@ -70,13 +72,14 @@ export interface RoleBoardProps {
 
 export function RoleBoard({ role, className }: RoleBoardProps) {
   const [orgNodeId, setOrgNodeId] = useState(DEV_IDENTITY.orgNodeId);
-  const [date, setDate] = useState(() => currentUtcDate());
+  const [date, setDate] = useState(() => currentSedeDate());
   const [pollMs, setPollMs] = useState(BOARD_POLL_DEFAULT_MS);
   const [compare, setCompare] = useState<BoardCompareMode>('off');
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<ApiFailure | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -85,9 +88,13 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
       .then((rows) => {
         if (!active) return;
         setSedeItems(rows.map((row) => ({ id: row.id, label: row.name })));
+        setSedeNodes(rows);
       })
       .catch(() => {
-        if (active) setSedeItems([]);
+        if (active) {
+          setSedeItems([]);
+          setSedeNodes([]);
+        }
       });
     return () => {
       active = false;
@@ -96,6 +103,9 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
   }, []);
 
   const org = orgNodeId.trim();
+  // The sede travels as a parameter: the selected sede's zone from the org
+  // tree, Lima fallback while the list loads or when the row has no zone.
+  const sedeTimezone = resolveSedeTimezone(sedeNodes, org === '' ? null : org);
   const cacheKey = boardCacheKey(role, org, date);
   const board = useResource<SaludDashboardBoard>(
     cacheKey,
@@ -179,7 +189,7 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
           </CardTitle>
           <CardDescription>
             El API exige que el rol de quien consulta sea el mismo del tablero; la sede debe estar
-            dentro de su subárbol. El día es UTC, igual que el filtro de la agenda y de la caja.
+            dentro de su subárbol. El día es el de la sede, igual que el filtro de la agenda y de la caja.
           </CardDescription>
         </CardHeader>
 
@@ -189,12 +199,12 @@ export function RoleBoard({ role, className }: RoleBoardProps) {
               Día anterior
             </Button>
             <Button
-              variant={isCurrentUtcDate(date) ? 'ghost' : 'outline'}
+              variant={isCurrentSedeDate(date, sedeTimezone) ? 'ghost' : 'outline'}
               size="sm"
-              disabled={isCurrentUtcDate(date)}
-              onClick={() => setDate(currentUtcDate())}
+              disabled={isCurrentSedeDate(date, sedeTimezone)}
+              onClick={() => setDate(currentSedeDate(sedeTimezone))}
             >
-              Hoy (UTC)
+              Hoy
             </Button>
             <Button variant="outline" size="sm" onClick={() => setDate(shiftUtcDate(date, 1))}>
               Día siguiente
@@ -413,8 +423,10 @@ function BoardKpis({
         <Kpi label="Cola" value={String(board.queue)} hint="En espera" delta={deltaText(delta, 'queue', previousDate)} />
       </div>
       <p className="text-xs text-muted-foreground">
-        Conteos de recepción: ni importes ni contenido clínico. El tablero de caja y el clínico son
-        contratos separados por diseño, no dos vistas del mismo objeto.
+        Conteos de recepción: ni importes ni contenido clínico. La cola cuenta las citas en
+        espera y en atención; las derivadas salieron de la agenda y no entran en estos
+        conteos. El tablero de caja y el clínico son contratos separados por diseño, no dos
+        vistas del mismo objeto.
       </p>
     </div>
   );

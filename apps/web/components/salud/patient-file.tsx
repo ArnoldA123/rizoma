@@ -19,8 +19,9 @@ import { type ApiFailure } from '@/lib/salud-errors';
 import { getPatient, listAppointments, listEpisodes, listPatients } from '@/lib/salud-api';
 import { listUsers } from '@/lib/users-api';
 import { appointmentsOfPatient } from '@/lib/salud-select';
-import { formatUtcDate, utcDateOf, utcTimeRange } from '@/lib/salud-time';
+import { formatUtcDate, sedeDateOf, sedeTimeRange } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { cn } from '@/lib/utils';
 
 /**
@@ -92,6 +93,9 @@ export function PatientFile({
   const appointments = useResource<AppointmentRecord[]>('appointments', (signal) =>
     listAppointments(signal),
   );
+  // The ficha reads in the sede zone of the patient (P4-1c): every stamp
+  // below renders through it, Lima fallback while the tree answers.
+  const sede = useSedeTimezone(patient.data?.orgNodeId ?? null);
 
   if (patient.loading) {
     return (
@@ -177,7 +181,7 @@ export function PatientFile({
               sede {record.orgNodeId}
             </span>
             <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-              creada {formatUtcDate(utcDateOf(record.createdAt) ?? '')}
+              creada {formatUtcDate(sedeDateOf(record.createdAt, sede.timezone) ?? '')}
             </span>
           </div>
 
@@ -225,7 +229,12 @@ export function PatientFile({
 
       <EpisodesPanel patientId={record.id} canWrite={canEpisodeWrite} resource={episodes} />
 
-      <TriagesPanel patientId={record.id} episodes={episodes.data ?? []} canWrite={canWrite} />
+      <TriagesPanel
+        patientId={record.id}
+        episodes={episodes.data ?? []}
+        canWrite={canWrite}
+        orgNodeId={record.orgNodeId}
+      />
 
       <PrescriptionsPanel
         patientId={record.id}
@@ -247,6 +256,7 @@ export function PatientFile({
         loading={appointments.loading}
         failure={appointments.failure}
         onRetry={appointments.reload}
+        sedeTimezone={sede.timezone}
       />
 
       <Card>
@@ -301,6 +311,8 @@ interface PatientAppointmentsProps {
   readonly loading: boolean;
   readonly failure: ApiFailure | null;
   readonly onRetry: () => void;
+  /** Sede zone of the ficha — the agenda rows read in it. */
+  readonly sedeTimezone: string;
 }
 
 /**
@@ -318,6 +330,7 @@ function PatientAppointments({
   loading,
   failure,
   onRetry,
+  sedeTimezone,
 }: PatientAppointmentsProps) {
   const [showAll, setShowAll] = useState(false);
   // The appointments endpoint carries only ids, so professional and patient
@@ -411,8 +424,8 @@ function PatientAppointments({
               >
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <span className="tabular text-[0.8125rem]">
-                    {formatUtcDate(utcDateOf(appointment.startsAt) ?? '')} ·{' '}
-                    {utcTimeRange(appointment.startsAt, appointment.durationMin)} UTC ·{' '}
+                    {formatUtcDate(sedeDateOf(appointment.startsAt, sedeTimezone) ?? '')} ·{' '}
+                    {sedeTimeRange(appointment.startsAt, appointment.durationMin, sedeTimezone)} ·{' '}
                     {appointment.patientId === patientId
                       ? patientName
                       : (patientNames.get(appointment.patientId) ??

@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
-import type { SiteBoard, SiteRecord } from '@rizoma/contracts';
+import { useEffect, useState } from 'react';
+import type { OrgNodeRecord, SiteBoard, SiteRecord } from '@rizoma/contracts';
 import { PageHeader } from '@/components/page-header';
 import { RouteIcon } from '@/components/route-icon';
 import { EntitySelector } from '@/components/ui/entity-select';
@@ -14,7 +14,8 @@ import { EmptyState, FailurePanel } from '@/components/ui/states';
 import { formatQuantity } from '@/lib/format';
 import { siteStatusLabel } from '@/lib/labels';
 import { getSiteBoard, listSites } from '@/lib/obras-api';
-import { currentUtcDate, formatUtcDateLong } from '@/lib/salud-time';
+import { listOrgNodes } from '@/lib/org-api';
+import { currentSedeDate, formatUtcDateLong, resolveSedeTimezone } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 import type { HomeLink } from './role-home';
 
@@ -28,14 +29,35 @@ export interface JefeDayProps {
  * The cover reads the obra list of the membership scope and focuses the first
  * obra by default; when the scope holds more than one, an EntitySelector of
  * sedes/obras picks the one on screen. The summary below is the site board of
- * today in UTC (avance, asistencia, stock crítico, hitos). Names own every row
- * — no identifier is rendered.
+ * today in the sede zone (avance, asistencia, stock crítico, hitos). Names own
+ * every row — no identifier is rendered.
  */
 export function JefeDay({ links }: JefeDayProps) {
-  const today = currentUtcDate();
   const sites = useResource<SiteRecord[]>('home-sites:obra', (signal) => listSites(signal));
   const rows = sites.data ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The sede travels as a parameter: first sede zone from the org tree, Lima
+  // fallback while the list loads or when the row has no zone.
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((nodes) => {
+        if (active) setSedeNodes(nodes);
+      })
+      .catch(() => {
+        if (active) setSedeNodes([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  const sedeTimezone = resolveSedeTimezone(sedeNodes);
+  const today = currentSedeDate(sedeTimezone);
   const activeId = selectedId ?? rows[0]?.id ?? null;
   const active = rows.find((row) => row.id === activeId) ?? rows[0] ?? null;
 
@@ -49,7 +71,7 @@ export function JefeDay({ links }: JefeDayProps) {
   return (
     <div className="flex flex-col gap-8">
       <PageHeader
-        eyebrow="Obra · hoy (UTC)"
+        eyebrow="Obra · hoy"
         title={active === null ? 'Su obra de hoy' : active.name}
         description={
           active === null

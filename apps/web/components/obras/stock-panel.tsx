@@ -28,7 +28,8 @@ import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { formatQuantity, formatUtcStamp } from '@/lib/format';
+import { formatQuantity, formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { stockMoveKindLabel, stockMoveStatusLabel, stockMoveStatusVariant } from '@/lib/labels';
 import {
   createStockItem,
@@ -152,6 +153,10 @@ export function StockPanel({
       return aPicked - bPicked;
     });
   }, [ledgerRows, itemId]);
+  // Moves carry no sede of their own and the panel receives no orgNodeId:
+  // the stamps read in the first-sede zone, Lima fallback meanwhile (P4-1d
+  // respaldo Lima).
+  const sede = useSedeTimezone(null);
   const [touched, setTouched] = useState<Readonly<Record<string, boolean>>>({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -573,7 +578,7 @@ export function StockPanel({
                     </span>
                     <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
                       movimiento {row.id.slice(0, 8)}… · ítem {row.itemId.slice(0, 8)}…
-                      {row.siteId === null ? '' : ` · obra ${row.siteId.slice(0, 8)}…`} · {formatUtcStamp(row.at)}
+                      {row.siteId === null ? '' : ` · obra ${row.siteId.slice(0, 8)}…`} · {formatSedeStamp(row.at, sede.timezone)}
                     </span>
                   </div>
                   {canConsume && stockMoveCanBeReversed(row) ? (

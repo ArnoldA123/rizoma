@@ -119,7 +119,7 @@ describe('splitActions', () => {
   it('denies every action to an unknown role', () => {
     const { permitted, denied } = splitActions('fantasma');
     assert.equal(permitted.length, 0);
-    assert.equal(denied.length, 12);
+    assert.equal(denied.length, 13);
   });
 });
 

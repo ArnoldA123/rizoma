@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
 import { CONSENT_STATUS_LABELS, consentStatusVariant, documentTypeLabel, recordTypeLabel } from '@/lib/labels';
-import { formatUtcDate, utcDateOf } from '@/lib/salud-time';
+import { formatSedeStamp } from '@/lib/salud-time';
 import { cn } from '@/lib/utils';
 
 /**
@@ -96,7 +96,7 @@ export function ConsentRow({
         <dd>
           {consent.signedAt === null
             ? 'sin firma'
-            : `${formatUtcDate(utcDateOf(consent.signedAt) ?? '')} (UTC)`}
+            : formatSedeStamp(consent.signedAt)}
         </dd>
         <dt className="text-muted-foreground">evidencia</dt>
         <dd className="font-mono break-all">

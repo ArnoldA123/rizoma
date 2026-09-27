@@ -13,10 +13,18 @@ import { ViewSelector } from '@/components/views/view-selector';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { requestJson } from '@/lib/api-client';
 import { withSavedView } from '@/lib/views-api';
-import { formatUtcStamp } from '@/lib/format';
+import { formatSedeStamp } from '@/lib/format';
 import { attendanceStatusLabel, attendanceStatusVariant } from '@/lib/labels';
 import { approveAttendance, listSiteStaff, markAttendance } from '@/lib/obras-api';
-import { currentUtcDate, formatUtcDateLong, isCurrentUtcDate, shiftUtcDate } from '@/lib/salud-time';
+import { listOrgNodes } from '@/lib/org-api';
+import type { OrgNodeRecord } from '@rizoma/contracts';
+import {
+  currentSedeDate,
+  formatUtcDateLong,
+  isCurrentSedeDate,
+  resolveSedeTimezone,
+  shiftUtcDate,
+} from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
 
 /**
@@ -80,6 +88,26 @@ export function AttendancePanel({
 
   const rows = attendance.data ?? [];
   const registered = rows.filter((row) => row.status === 'registered').length;
+  // The sede travels as a parameter: first sede zone from the org tree, Lima
+  // fallback while the list loads or when the row has no zone.
+  const [sedeNodes, setSedeNodes] = useState<readonly OrgNodeRecord[]>([]);
+  const sedeTimezone = resolveSedeTimezone(sedeNodes);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    listOrgNodes({ kind: 'sede' }, controller.signal)
+      .then((nodes) => {
+        if (active) setSedeNodes(nodes);
+      })
+      .catch(() => {
+        if (active) setSedeNodes([]);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
   // Worker names resolve in the browser against the site staff list: the
   // day endpoint carries only user ids. A failed read leaves the map empty
   // and the row falls back to the short id — the list never blocks on it.
@@ -112,10 +140,10 @@ export function AttendancePanel({
       // to today so the row the user just created is on screen. The key change
       // refetches the day; the extra silent reload is a no-op when it is already
       // today.
-      if (!isCurrentUtcDate(date)) onDateChange(currentUtcDate());
+      if (!isCurrentSedeDate(date, sedeTimezone)) onDateChange(currentSedeDate(sedeTimezone));
       attendance.reloadSilently();
       setSuccess(
-        `Asistencia marcada (${formatUtcStamp(mark.checkIn)}). Queda en estado «Registrada» hasta que capataz o jefatura la apruebe.`,
+        `Asistencia marcada (${formatSedeStamp(mark.checkIn, sedeTimezone)}). Queda en estado «Registrada» hasta que capataz o jefatura la apruebe.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -142,9 +170,9 @@ export function AttendancePanel({
         <CardEyebrow>Asistencia</CardEyebrow>
         <CardTitle as="h2">{formatUtcDateLong(date)}</CardTitle>
         <CardDescription>
-          El día es UTC, igual que el filtro de la agenda de salud y el tablero de obra. Marcar es
-          una acción propia: el API resuelve el sujeto del token y rechaza cualquier otro{' '}
-          <code className="font-mono text-xs">userId</code>.
+          El día es el de la sede, igual que el filtro de la agenda de salud y el tablero de obra.
+          Marcar es una acción propia: el API resuelve el sujeto del token y rechaza cualquier
+          otro <code className="font-mono text-xs">userId</code>.
         </CardDescription>
       </CardHeader>
 
@@ -155,12 +183,12 @@ export function AttendancePanel({
             Día anterior
           </Button>
           <Button
-            variant={isCurrentUtcDate(date) ? 'ghost' : 'outline'}
+            variant={isCurrentSedeDate(date, sedeTimezone) ? 'ghost' : 'outline'}
             size="sm"
-            disabled={isCurrentUtcDate(date)}
-            onClick={() => onDateChange(currentUtcDate())}
+            disabled={isCurrentSedeDate(date, sedeTimezone)}
+            onClick={() => onDateChange(currentSedeDate(sedeTimezone))}
           >
-            Hoy (UTC)
+            Hoy
           </Button>
           <Button variant="outline" size="sm" onClick={() => onDateChange(shiftUtcDate(date, 1))}>
             Día siguiente
@@ -245,8 +273,9 @@ export function AttendancePanel({
                     </Badge>
                   </div>
                   <span className="tabular text-xs text-muted-foreground">
-                    ingreso {formatUtcStamp(row.checkIn)} · salida{' '}
-                    {row.checkOut === null ? '—' : formatUtcStamp(row.checkOut)} · origen {row.source}
+                    ingreso {formatSedeStamp(row.checkIn, sedeTimezone)} · salida{' '}
+                    {row.checkOut === null ? '—' : formatSedeStamp(row.checkOut, sedeTimezone)} · origen{' '}
+                    {row.source}
                   </span>
                   <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
                     marca {row.id.slice(0, 8)}… · usuario {row.userId.slice(0, 8)}…

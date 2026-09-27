@@ -27,6 +27,37 @@ export const ORG_NODE_KINDS = [
 export const orgNodeKindSchema = z.enum(ORG_NODE_KINDS);
 export type OrgNodeKind = z.infer<typeof orgNodeKindSchema>;
 
+/**
+ * Fallback sede zone (P4-1a): every board resolves "today" in the sede's
+ * zone, and a node with no usable zone reads as Lima. The API mirrors this
+ * constant in its own module so the runtime has no cross-package import;
+ * the values must stay `America/Lima` on both sides.
+ */
+export const DEFAULT_ORG_TIMEZONE = 'America/Lima';
+
+/** True when `value` is a usable IANA timezone (backed by `Intl`). */
+export function isValidIanaTimezone(value: unknown): boolean {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** IANA timezone of the sede (P4-1a, `org_nodes.timezone` in migration 010). */
+export const orgTimezoneSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine((value) => isValidIanaTimezone(value), 'Expected an IANA timezone');
+
+/** One org tree node timezone, or the Lima fallback when the row has none. */
+export function normalizeOrgTimezone(value: unknown): string {
+  return isValidIanaTimezone(value) ? (value as string) : DEFAULT_ORG_TIMEZONE;
+}
+
 /** `GET /v1/org/nodes` — one org tree node. */
 export const orgNodeRecordSchema = z.object({
   id: uuidSchema,
@@ -35,6 +66,12 @@ export const orgNodeRecordSchema = z.object({
   kind: z.string(),
   name: z.string(),
   active: z.boolean(),
+  /**
+   * IANA timezone of the sede (P4-1a). Optional on the wire so pre-010
+   * payloads still parse; producers always send it and consumers fall back
+   * to `DEFAULT_ORG_TIMEZONE` when it is absent.
+   */
+  timezone: orgTimezoneSchema.optional(),
 });
 
 export type OrgNodeRecord = z.infer<typeof orgNodeRecordSchema>;

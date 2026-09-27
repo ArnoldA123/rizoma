@@ -154,7 +154,7 @@ describe('listOrgNodes', () => {
       rows.map((row) => row.name),
       ['Almacen Lima', 'Demo Company', 'Sede Arequipa', 'Sede Cerrada', 'Sede Lima'],
     );
-    assert.deepEqual(Object.keys(rows[0] ?? {}).sort(), ['active', 'id', 'kind', 'name', 'parentId']);
+    assert.deepEqual(Object.keys(rows[0] ?? {}).sort(), ['active', 'id', 'kind', 'name', 'parentId', 'timezone']);
     const root = rows.find((row) => row.id === ROOT);
     assert.equal(root?.parentId, null);
     const area = rows.find((row) => row.id === AREA_LIMA);

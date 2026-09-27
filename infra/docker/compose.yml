@@ -110,6 +110,35 @@ services:
     networks:
       - rizoma
 
+  # BullMQ workers host (P4-3b): drains the `notify-send` queue (outbox relay
+  # + deferred 24h appointment reminders, dispatched by job name) and runs the
+  # release sweep repeatable every 15 minutes (`scheduled` visits past their
+  # start → `cancelled` + one `appointment.released` audit row each).
+  #
+  # Type-stripping runtime, like the tests: no build step, `node src/main.ts`
+  # straight from the workspace mount. Dependencies install once into the
+  # mount on first start; afterwards `npm install` is a fast no-op check.
+  # Credentials below are the same SYNTHETIC demo values as the rest of this
+  # file — never valid outside local development.
+  workers:
+    image: node:22-bookworm-slim
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /app/apps/workers
+    volumes:
+      - ../..:/app
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rizoma}:${POSTGRES_PASSWORD:-rizoma_demo_password}@postgres:5432/${POSTGRES_DB:-rizoma}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-rizoma_demo_password}@redis:6379
+      NOTIFY_ADAPTER: log
+    command: ['sh', '-c', 'npm --prefix /app install --no-audit --no-fund && node src/main.ts']
+    networks:
+      - rizoma
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     restart: unless-stopped

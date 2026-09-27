@@ -18,6 +18,7 @@
 import { HttpException } from '@nestjs/common';
 import { canActivate, loadMembership, type MembershipRecord } from '../auth/access.guard.ts';
 import { rolePermitsAction, type ActionCode } from '../auth/policy.ts';
+import { assertTransition } from '../state-transitions/state-transitions.service.ts';
 import type { ActorContext, SaludClient } from './salud.service.ts';
 
 /** Tenant module this vertical requires (bases §3.1 property 6 / §3.5). */
@@ -391,6 +392,23 @@ const INSERT_PRESCRIPTION_SQL = `INSERT INTO prescriptions
 VALUES ($1, $2, $3, $4, $5::jsonb, $6)
 RETURNING ${PRESCRIPTION_COLUMNS}`;
 
+const SELECT_PRESCRIPTION_SQL = `SELECT ${PRESCRIPTION_COLUMNS}
+FROM prescriptions WHERE tenant_id = $1 AND id = $2`;
+
+const UPDATE_PRESCRIPTION_STATUS_SQL = `UPDATE prescriptions
+SET status = $3
+WHERE tenant_id = $1 AND id = $2
+RETURNING ${PRESCRIPTION_COLUMNS}`;
+
+/**
+ * P4-2a close-out: the catalog (`state_transitions`, entity `prescription`,
+ * migration 011) lists exactly `draft → issued` and `draft → cancelled`.
+ * Anything else is denied with 403, so the code needs no machine of its own
+ * — only the 400 for a target outside the `{issued, cancelled}` pair.
+ */
+export const PRESCRIPTION_TRANSITION_TARGETS = ['issued', 'cancelled'] as const;
+export type PrescriptionTransitionTarget = (typeof PRESCRIPTION_TRANSITION_TARGETS)[number];
+
 // ============ use cases ============
 
 /**
@@ -488,4 +506,83 @@ export async function createPrescription(
     },
   });
   return prescription;
+}
+
+// ============ transitions (P4-2a: Emitir / Anular) ============
+
+/**
+ * `PATCH /v1/salud/prescriptions/:id` — Emite (`issued`) or Anula
+ * (`cancelled`) a `draft` order of an `open` episode, by the `episode.write`
+ * role (`medico`). A target outside the pair is a 400; a `draft` of a
+ * closed episode, an already-issued order, or a caller without the clinical
+ * write is a 403 audited as `access.denied`. Every accepted move appends
+ * one `audit_log` row (`prescription.issued` / `prescription.cancelled`).
+ */
+export async function transitionPrescription(
+  actor: ActorContext,
+  prescriptionId: string,
+  status: unknown,
+): Promise<PrescriptionRecord> {
+  requireUuidParam(prescriptionId, 'prescription id', actor.traceId);
+  const target = typeof status === 'string' ? status.trim() : '';
+  if (!(PRESCRIPTION_TRANSITION_TARGETS as readonly string[]).includes(target)) {
+    throw badRequest(
+      `Invalid status (expected issued|cancelled): ${String(status)}`,
+      actor.traceId,
+    );
+  }
+  const current = await actor.client.query(SELECT_PRESCRIPTION_SQL, [
+    actor.tenantId,
+    prescriptionId,
+  ]);
+  const currentRow = readRows(current)[0];
+  if (currentRow === undefined) throw notFound('prescription', actor.traceId);
+  const prescription = mapPrescription(currentRow);
+  if (prescription.status === target) return prescription;
+
+  const episode = await findEpisodeScope(actor, prescription.episodeId);
+  if (episode === null) throw notFound('episode', actor.traceId);
+
+  const facts = await loadFacts(actor);
+  // The catalog is the sole authority over the move (fail-closed when the
+  // 011 seed is absent); the episode must additionally be `open`.
+  const transitionAllows = await assertTransition(actor.client, {
+    entity: 'prescription',
+    from: prescription.status,
+    to: target,
+    role: facts.membership?.role ?? '',
+    tenantId: actor.tenantId,
+  });
+  const membership = await authorize(actor, facts, {
+    action: 'episode.write',
+    entityId: prescription.id,
+    orgNodeId: episode.orgNodeId,
+    stateAllows: episode.status === 'open' && transitionAllows,
+    attemptedAction: 'prescription.transition',
+  });
+  const result = await actor.client.query(UPDATE_PRESCRIPTION_STATUS_SQL, [
+    actor.tenantId,
+    prescription.id,
+    target,
+  ]);
+  const row = readRows(result)[0];
+  if (row === undefined) {
+    throw new HttpException(
+      { code: 'write.failed', message: 'Prescription transition returned no row', traceId: actor.traceId },
+      500,
+    );
+  }
+  const updated = mapPrescription(row);
+  await writeAudit(actor, membership, {
+    action: target === 'issued' ? 'prescription.issued' : 'prescription.cancelled',
+    entityId: updated.id,
+    orgNodeId: episode.orgNodeId,
+    diff: {
+      from: prescription.status,
+      to: updated.status,
+      episodeId: episode.id,
+      patientId: updated.patientId,
+    },
+  });
+  return updated;
 }

@@ -25,7 +25,7 @@ export default function SaludAgendaPage() {
       <PageHeader
         eyebrow="Salud · agenda"
         title="Agenda"
-        description="Citas del día en UTC, vista por rol, actualización automática cada dos minutos y programación con validación en vivo."
+        description="Citas del día en hora de la sede, vista por rol, actualización automática cada dos minutos y programación con validación en vivo."
         badges={['salud']}
       />
 

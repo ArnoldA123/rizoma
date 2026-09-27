@@ -27,6 +27,8 @@ import {
   appointmentCreateInputSchema,
   appointmentListSchema,
   appointmentRecordSchema,
+  appointmentRescheduleInputSchema,
+  appointmentStatusInputSchema,
   cashSessionCloseInputSchema,
   cashSessionListSchema,
   cashSessionOpenInputSchema,
@@ -51,6 +53,7 @@ import {
   prescriptionCreateInputSchema,
   prescriptionListSchema,
   prescriptionRecordSchema,
+  prescriptionTransitionInputSchema,
   quoteCreateInputSchema,
   quoteListSchema,
   quoteRecordSchema,
@@ -61,6 +64,8 @@ import {
   triageRecordSchema,
   type AppointmentCreateInput,
   type AppointmentRecord,
+  type AppointmentRescheduleInput,
+  type AppointmentStatusInput,
   type CashSessionCloseInput,
   type CashSessionListQuery,
   type CashSessionOpenInput,
@@ -82,6 +87,7 @@ import {
   type PatientsImportInput,
   type PrescriptionCreateInput,
   type PrescriptionRecord,
+  type PrescriptionTransitionInput,
   type QuoteCreateInput,
   type QuoteRecord,
   type SaludBoardQuery,
@@ -212,6 +218,71 @@ export function createAppointment(input: AppointmentCreateInput): Promise<Appoin
   return postJson(`${BASE}/appointments`, body, appointmentRecordSchema);
 }
 
+/** One closed-machine move of `PATCH /v1/salud/appointments/:id/status`. */
+function patchAppointmentStatus(
+  appointmentId: string,
+  status: AppointmentStatusInput['status'],
+): Promise<AppointmentRecord> {
+  const body = appointmentStatusInputSchema.parse({ status });
+  return patchJson(
+    `${BASE}/appointments/${encodeURIComponent(appointmentId)}/status`,
+    body,
+    appointmentRecordSchema,
+  );
+}
+
+/** `scheduled → confirmed` — the desk confirms the visit. */
+export function confirmAppointment(appointmentId: string): Promise<AppointmentRecord> {
+  return patchAppointmentStatus(appointmentId, 'confirmed');
+}
+
+/** One step of the clinical path (`confirmed → checked_in → in_care → completed`). */
+export function attendAppointment(
+  appointmentId: string,
+  step: 'checked_in' | 'in_care' | 'completed',
+): Promise<AppointmentRecord> {
+  return patchAppointmentStatus(appointmentId, step);
+}
+
+/** `confirmed → no_show` — the visit is recorded as unattended. */
+export function markNoShow(appointmentId: string): Promise<AppointmentRecord> {
+  return patchAppointmentStatus(appointmentId, 'no_show');
+}
+
+/** `scheduled/confirmed → cancelled` — the visit is voided, keeping its row. */
+export function cancelAppointment(appointmentId: string): Promise<AppointmentRecord> {
+  return patchAppointmentStatus(appointmentId, 'cancelled');
+}
+
+/**
+ * `PATCH /v1/salud/appointments/:id/reschedule` — moves `startsAt` (and
+ * optionally `durationMin`) from `scheduled`/`confirmed`, keeping the status.
+ */
+export function rescheduleAppointment(
+  appointmentId: string,
+  input: AppointmentRescheduleInput,
+): Promise<AppointmentRecord> {
+  const body = appointmentRescheduleInputSchema.parse(input);
+  return patchJson(
+    `${BASE}/appointments/${encodeURIComponent(appointmentId)}/reschedule`,
+    body,
+    appointmentRecordSchema,
+  );
+}
+
+/**
+ * `POST /v1/salud/appointments/:id/derive` — hands a `scheduled` visit to
+ * another service (`derived` + audit). The reception queue filters it out
+ * from here on (`?exclude_status=derived`).
+ */
+export function deriveAppointment(appointmentId: string): Promise<AppointmentRecord> {
+  return postJson(
+    `${BASE}/appointments/${encodeURIComponent(appointmentId)}/derive`,
+    {},
+    appointmentRecordSchema,
+  );
+}
+
 // ============ triages ============
 
 /** `GET /v1/salud/triages?patient=` — vital-signs history (`patient.read`). */
@@ -249,6 +320,29 @@ export function createPrescription(input: PrescriptionCreateInput): Promise<Pres
   return postJson(`${BASE}/prescriptions`, body, prescriptionRecordSchema);
 }
 
+/** One `PATCH /v1/salud/prescriptions/:id` move (`draft → issued | cancelled`). */
+function patchPrescriptionStatus(
+  prescriptionId: string,
+  status: PrescriptionTransitionInput['status'],
+): Promise<PrescriptionRecord> {
+  const body = prescriptionTransitionInputSchema.parse({ status });
+  return patchJson(
+    `${BASE}/prescriptions/${encodeURIComponent(prescriptionId)}`,
+    body,
+    prescriptionRecordSchema,
+  );
+}
+
+/** `draft → issued` — the order leaves the draft state. */
+export function issuePrescription(prescriptionId: string): Promise<PrescriptionRecord> {
+  return patchPrescriptionStatus(prescriptionId, 'issued');
+}
+
+/** `draft → cancelled` — the draft order is voided, keeping its row. */
+export function cancelPrescription(prescriptionId: string): Promise<PrescriptionRecord> {
+  return patchPrescriptionStatus(prescriptionId, 'cancelled');
+}
+
 // ============ POST plumbing ============
 
 /**
@@ -265,6 +359,26 @@ async function postJson<T>(
 ): Promise<T> {
   const record = await requestJson(path, schema, {
     method: 'POST',
+    body,
+    idempotencyKey,
+  });
+  if (record === null) throw new Error(`El API respondió sin cuerpo para ${path}`);
+  return record;
+}
+
+/**
+ * One JSON `PATCH` with a replay key and the endpoint's schema. Status moves
+ * and reschedules are idempotent on the row, but the key stays: a double
+ * click sends one intent, and collapsing the replay is exactly its job.
+ */
+async function patchJson<T>(
+  path: string,
+  body: unknown,
+  schema: ZodType<T>,
+  idempotencyKey: string = newIdempotencyKey(),
+): Promise<T> {
+  const record = await requestJson(path, schema, {
+    method: 'PATCH',
     body,
     idempotencyKey,
   });

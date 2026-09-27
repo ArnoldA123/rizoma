@@ -24,7 +24,8 @@ import {
   type BillingLineDraft,
 } from '@/components/salud/billing-lines-field';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states';
-import { formatPen, formatUtcStamp } from '@/lib/format';
+import { formatPen, formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { quoteStatusLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { createQuote, listQuotes } from '@/lib/salud-api';
@@ -52,6 +53,9 @@ export interface QuotesPanelProps {
 
 export function QuotesPanel({ defaultOrgNodeId, onIssueFromQuote, className }: QuotesPanelProps) {
   const quotes = useResource<QuoteRecord[]>('quotes', (signal) => listQuotes(signal));
+  // Quotes span the scope but carry no screen-level sede: the rows read in the
+  // screen prefill zone (P4-1c, agenda-board precedent), Lima fallback meanwhile.
+  const sede = useSedeTimezone(defaultOrgNodeId);
   const [page, setPage] = useState(1);
   const [formOpen, setFormOpen] = useState(false);
 
@@ -141,7 +145,7 @@ export function QuotesPanel({ defaultOrgNodeId, onIssueFromQuote, className }: Q
                   </div>
                   <span className="tabular text-xs text-muted-foreground">
                     {formatPen(quote.total)} · {quote.items.length} línea
-                    {quote.items.length === 1 ? '' : 's'} · {formatUtcStamp(quote.createdAt)}
+                    {quote.items.length === 1 ? '' : 's'} · {formatSedeStamp(quote.createdAt, sede.timezone)}
                   </span>
                   <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
                     id {quote.id}

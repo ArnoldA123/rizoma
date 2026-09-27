@@ -9,7 +9,7 @@ verde (main protegida). Sin cambios de negocio, solo harness/tests.
 ## Tareas
 - [ ] E0 Mapeo (scout solo lectura): secuencias crear→usar sin poll en salud.e2e/obras.e2e, helpers existentes (auditByTraceEventually, call), mecanismo finish-commit, job CI e2e
 - [x] E1 Poll-until-visible en las secuencias frágiles (mismo patrón c885909). Verde: salud 18/18 + obras 30/30 en 2 DBs frescas. Verify PASS (retry solo 404 transitorio, denegaciones directas).
-- [ ] E2 Cierre: e2e verde estable (repetidas locales o re-corridas CI) + PR + merge
+- [x] E2 Cierre: e2e verde estable (repetidas locales o re-corridas CI) + PR + merge. PR #13 mergeado (13f3e80) con CI 5/5 a la primera.
 
 ## Fuera
 - Cambios de negocio o migraciones

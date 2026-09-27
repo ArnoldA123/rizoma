@@ -41,7 +41,36 @@ export const NOTIFY_TEMPLATE_INVOICE_ISSUED = 'invoice.issued' as const;
  */
 export const NOTIFY_TEMPLATE_APPOINTMENT_SCHEDULED = 'appointment.scheduled' as const;
 
+/**
+ * Template `code` the salud emitter schedules as a deferred 24h notice
+ * (one BullMQ delayed job per confirmed appointment, deterministic job id
+ * `appointment-reminder-24h:<appointmentId>`). One `active` version per
+ * channel (`email`, `sms`), seeded per tenant by migration 012. Mirrored in
+ * `apps/api/src/notify/notify.service.ts` and
+ * `apps/workers/src/queues.ts` (`NOTIFY_REMINDER_TEMPLATE`).
+ */
+export const NOTIFY_TEMPLATE_APPOINTMENT_REMINDER_24H = 'appointment.reminder_24h' as const;
+
 export type NotifyTemplateStatus = z.infer<typeof notifyTemplateStatusSchema>;
+
+/**
+ * Payload the deferred 24h reminder carries on its BullMQ job (P4-3).
+ * Rendered into the `{{appointmentId}}`, `{{patientId}}` and `{{startsAt}}`
+ * slots of the active `appointment.reminder_24h` template at send time;
+ * the worker additionally derives `{{startsAtLocal}}` (the same instant in
+ * the sede timezone) before rendering. `message_log` stores no body, so
+ * this payload is transient — it travels on the job, never on the row.
+ */
+export const appointmentReminderPayloadSchema = z.object({
+  /** Appointment the reminder was scheduled for. */
+  appointmentId: uuidSchema,
+  /** Patient the appointment belongs to. */
+  patientId: uuidSchema,
+  /** Appointment start (UTC instant); the fire time is `startsAt - 24h`. */
+  startsAt: isoValueSchema,
+});
+
+export type AppointmentReminderPayload = z.infer<typeof appointmentReminderPayloadSchema>;
 
 /** `POST /v1/notify/send` — enqueue one notification for the caller tenant. */
 export const notifySendInputSchema = z.object({

@@ -15,7 +15,8 @@ import { Card, CardContent, CardDescription, CardEyebrow, CardHeader, CardTitle 
 import { FieldMessage, fieldStateProps } from '@/components/ui/field-feedback';
 import { Input } from '@/components/ui/input';
 import { FailurePanel } from '@/components/salud/states';
-import { formatPen, formatUtcStamp } from '@/lib/format';
+import { formatPen, formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { paymentMethodLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { closeCashSession, listCashSessions, openCashSession } from '@/lib/salud-api';
@@ -51,6 +52,9 @@ export function CashSessionPanel({
   onClosed,
   className,
 }: CashSessionPanelProps) {
+  // The shift carries its sede; without one the screen prefill stands in
+  // (P4-1c). Every stamp below reads in that zone, Lima fallback meanwhile.
+  const sede = useSedeTimezone(session?.orgNodeId ?? defaultOrgNodeId);
   return (
     <Card className={className}>
       <CardHeader>
@@ -68,14 +72,14 @@ export function CashSessionPanel({
           <dl className="tabular grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-border bg-secondary px-4 py-3 text-xs">
             <dt className="text-muted-foreground">turno</dt>
             <dd>
-              {formatUtcStamp(session.openedAt)} · {session.status === 'open' ? 'abierto' : 'cerrado'}
+              {formatSedeStamp(session.openedAt, sede.timezone)} · {session.status === 'open' ? 'abierto' : 'cerrado'}
             </dd>
             <dt className="text-muted-foreground">estado</dt>
             <dd>{session.status === 'open' ? 'abierto' : 'cerrado'}</dd>
             <dt className="text-muted-foreground">apertura</dt>
-            <dd>{formatUtcStamp(session.openedAt)}</dd>
+            <dd>{formatSedeStamp(session.openedAt, sede.timezone)}</dd>
             <dt className="text-muted-foreground">cierre</dt>
-            <dd>{formatUtcStamp(session.closedAt)}</dd>
+            <dd>{formatSedeStamp(session.closedAt, sede.timezone)}</dd>
             <dt className="text-muted-foreground">id</dt>
             <dd className="font-mono text-[0.6875rem] text-muted-foreground break-all">
               {session.id}
@@ -101,7 +105,7 @@ export function CashSessionPanel({
             onOpened={onOpened}
             disabled={session !== null && session.status === 'open'}
           />
-          <CloseShiftForm session={session} onClosed={onClosed} />
+          <CloseShiftForm session={session} onClosed={onClosed} sedeTimezone={sede.timezone} />
         </div>
       </CardContent>
     </Card>
@@ -202,9 +206,11 @@ function OpenShiftForm({ defaultOrgNodeId, onOpened, disabled }: OpenShiftFormPr
 interface CloseShiftFormProps {
   readonly session: CashSessionRecord | null;
   readonly onClosed: (session: CashSessionRecord) => void;
+  /** Sede zone of the panel — the shift list reads in it. */
+  readonly sedeTimezone: string;
 }
 
-function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
+function CloseShiftForm({ session, onClosed, sedeTimezone }: CloseShiftFormProps) {
   const [cashSessionId, setCashSessionId] = useState('');
   const [totals, setTotals] = useState<Readonly<Record<string, string>>>(() =>
     Object.fromEntries(CASH_TOTAL_METHODS.map((method) => [method, ''])),
@@ -224,7 +230,7 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
         setSessionItems(
           rows.map((row) => ({
             id: row.id,
-            label: `${(row.openedAt ?? '').slice(0, 16).replace('T', ' ')} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
+            label: `${formatSedeStamp(row.openedAt, sedeTimezone)} · ${row.status === 'open' ? 'abierto' : 'cerrado'}`,
             sub: row.openedByName ?? undefined,
           })),
         );
@@ -236,7 +242,7 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
       active = false;
       controller.abort();
     };
-  }, []);
+  }, [sedeTimezone]);
 
   const target = cashSessionId.trim() === '' ? (session?.id ?? '') : cashSessionId;
   const checks: Readonly<Record<string, FieldCheck>> = {
@@ -282,7 +288,7 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
         <EntitySelector
           label="Turno a cerrar"
           items={session?.id == null ? sessionItems : [
-            { id: session.id, label: `${(session.openedAt ?? '').slice(0, 16).replace('T', ' ')} · ${session.status === 'open' ? 'abierto' : 'cerrado'}`, sub: session.openedByName ?? undefined },
+            { id: session.id, label: `${formatSedeStamp(session.openedAt, sedeTimezone)} · ${session.status === 'open' ? 'abierto' : 'cerrado'}`, sub: session.openedByName ?? undefined },
             ...sessionItems.filter((item) => item.id !== session.id),
           ]}
           value={cashSessionId === '' ? null : cashSessionId}
@@ -334,7 +340,7 @@ function CloseShiftForm({ session, onClosed }: CloseShiftFormProps) {
         </Button>
         {closed === null ? null : (
           <span role="status" className="sd-rise text-xs text-muted-foreground">
-            Turno del {formatUtcStamp(closed.openedAt)} cerrado el {formatUtcStamp(closed.closedAt)}.
+            Turno del {formatSedeStamp(closed.openedAt, sedeTimezone)} cerrado el {formatSedeStamp(closed.closedAt, sedeTimezone)}.
           </span>
         )}
       </div>

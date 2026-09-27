@@ -39,6 +39,13 @@ export function shortId(id: string | null | undefined): string {
   return `${id.slice(0, 8)}…`;
 }
 
+/**
+ * Sede timestamp without a zone suffix (`25 sep 2026 11:05`): the single
+ * implementation lives in `lib/salud-time.ts`, re-exported here so row code
+ * keeps importing stamps from the formatting module.
+ */
+export { formatSedeStamp } from './salud-time.ts';
+
 /** `25 sep 2026 16:05` (UTC) — a timestamp, or `—` when absent. */
 export function formatUtcStamp(iso: string | null | undefined): string {
   if (iso === null || iso === undefined || iso === '') return '—';
