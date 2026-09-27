@@ -29,9 +29,15 @@
 // carry the test coverage.
 import type { Job, Queue, Worker, WorkerOptions } from 'bullmq';
 import {
+  NOTIFY_REMINDER_TEMPLATE,
   QUEUE_CONFIGS,
   QUEUE_NAMES,
+  formatInstantInTimezone,
   nextRetryDelay,
+  normalizeReminderTimezone,
+  reminderDelayMs,
+  reminderFireAtIso,
+  reminderJobId,
   type QueueName,
 } from './queues.ts';
 import type { NotifyAdapter } from './notify-adapter.ts';
@@ -310,6 +316,12 @@ export interface NotifyWorkerOptions {
   onRetry?: (job: NotifySendJob, delaySeconds: number) => Promise<void>;
   /** BullMQ concurrency (one slow provider must not stall the queue). */
   concurrency?: number;
+  /**
+   * Live appointment-status read for deferred reminder jobs (P4-3b). The
+   * entrypoint wires it to the pool; without it a reminder job cannot prove
+   * `confirmed` and is skipped as missing — never sent blind.
+   */
+  loadAppointmentStatus?: (tenantId: string, appointmentId: string) => Promise<string | null>;
 }
 
 /**
@@ -319,6 +331,11 @@ export interface NotifyWorkerOptions {
  * schedule lives in the outcome (`nextRetryDelay`) and the delayed retry is
  * re-added through `onRetry`, so retries stay observable and survive
  * restarts — exactly like the `webhook-deliver` row schedule.
+ *
+ * Deferred 24h reminders (P4-3b) share this queue under the
+ * `REMINDER_JOB_NAME` job name: the processor dispatches them to
+ * `processAppointmentReminderFire` (live `confirmed` re-check, sede-time
+ * render, one `sent` row) instead of the outbox path.
  */
 export async function createNotifyWorker(options: NotifyWorkerOptions): Promise<Worker> {
   const { Worker: BullWorker } = await import('bullmq');
@@ -326,6 +343,22 @@ export async function createNotifyWorker(options: NotifyWorkerOptions): Promise<
   const worker = new BullWorker(
     NOTIFY_QUEUE,
     async (job: Job<NotifySendJob>) => {
+      if (job.name === REMINDER_JOB_NAME) {
+        const data: unknown = job.data;
+        if (!isAppointmentReminderJobData(data)) {
+          return { appointmentId: '', outcome: 'failed', providerRef: null };
+        }
+        const fired = await processAppointmentReminderFire(data, {
+          adapter: options.adapter,
+          client: options.client,
+          loadAppointmentStatus: options.loadAppointmentStatus ?? (async () => null),
+        });
+        return {
+          appointmentId: fired.appointmentId,
+          outcome: fired.outcome,
+          providerRef: fired.providerRef,
+        };
+      }
       const { outcome } = await processNotifySend(job.data, {
         adapter: options.adapter,
         client: options.client,
@@ -368,4 +401,394 @@ export async function enqueueNotifyJob(queue: Queue<NotifySendJob>, job: NotifyS
 /** Total tries configured for the queue (initial + retries, from `queues.ts`). */
 export function notifyMaxAttempts(): number {
   return QUEUE_CONFIGS[NOTIFY_QUEUE].maxAttempts;
+}
+
+// ============ deferred 24h appointment reminder (P4-3) ============
+//
+// The API schedules one delayed `notify-send` job per confirmed appointment
+// (fire time `startsAt - 24h`, deterministic id `reminderJobId`); this
+// section is the worker side: an in-memory scheduler the tests and the
+// local/demo runtime share (the log adapter sends, no real provider), plus
+// the fire-time guard that keeps the P4 decision — notice to `confirmed`
+// only. A BullMQ queue replaces `ReminderScheduler` without touching the
+// call sites: `scheduleAppointmentReminder` / `cancelAppointmentReminder`
+// keep their shape, and the job payload already carries everything the
+// delayed BullMQ job would need.
+
+/** Payload a deferred reminder job carries (mirrors the contracts schema). */
+export interface AppointmentReminderPayload {
+  readonly appointmentId: string;
+  readonly patientId: string;
+  readonly startsAt: string | null;
+}
+
+/** One deferred reminder: the delayed job, in memory or on BullMQ. */
+export interface ScheduledAppointmentReminder {
+  /** Deterministic id (`reminderJobId`): rescheduling overwrites, never doubles. */
+  readonly jobId: string;
+  readonly tenantId: string;
+  readonly appointmentId: string;
+  readonly channel: string;
+  /** Template `code` rendered at fire time (always the 24h reminder). */
+  readonly template: string;
+  /** Destination address (the SQL `recipient` column at send time). */
+  readonly to: string;
+  readonly payload: AppointmentReminderPayload;
+  /** Sede zone used to render `{{startsAtLocal}}` (`org_nodes.timezone`, Lima fallback). */
+  readonly timezone: string;
+  /** ISO instant the reminder fires (`startsAt - 24h`). */
+  readonly fireAt: string;
+}
+
+/** Minimal scheduler surface: an in-memory map today, BullMQ tomorrow. */
+export interface ReminderScheduler {
+  schedule(entry: ScheduledAppointmentReminder): Promise<void>;
+  cancel(jobId: string): Promise<void>;
+}
+
+/** Input the API-side hook resolves (contact + sede zone) before scheduling. */
+export interface AppointmentReminderInput {
+  readonly tenantId: string;
+  readonly appointmentId: string;
+  readonly patientId: string;
+  readonly startsAt: string | null;
+  readonly channel: string;
+  readonly to: string;
+  readonly timezone?: string;
+}
+
+/** Answer of one schedule attempt (never throws: the caller stays best-effort). */
+export interface ReminderScheduleResult {
+  readonly scheduled: boolean;
+  readonly jobId: string;
+  /** ISO fire time, or `null` when nothing was scheduled. */
+  readonly fireAt: string | null;
+  /** Why nothing was scheduled (`already_due`, `invalid_input`, `scheduler_error`). */
+  readonly reason: string | null;
+}
+
+/**
+ * In-memory deferred emitter (scout P4-0): holds the delayed reminders of
+ * the process keyed by deterministic job id. `schedule` upserts, so
+ * reprogramming a confirmed visit replaces its job instead of stacking a
+ * second notice; `cancel` drops it. `due` pops every entry whose fire time
+ * reached `nowMs`, oldest first — the worker drains it at fire time.
+ */
+export class InMemoryReminderScheduler implements ReminderScheduler {
+  private readonly entries = new Map<string, ScheduledAppointmentReminder>();
+
+  async schedule(entry: ScheduledAppointmentReminder): Promise<void> {
+    this.entries.set(entry.jobId, entry);
+  }
+
+  async cancel(jobId: string): Promise<void> {
+    this.entries.delete(jobId);
+  }
+
+  /** Entries currently held, oldest fire time first (a copy). */
+  pending(): ScheduledAppointmentReminder[] {
+    return [...this.entries.values()].sort((a, b) =>
+      a.fireAt < b.fireAt ? -1 : a.fireAt > b.fireAt ? 1 : 0,
+    );
+  }
+
+  /** Removes and returns every entry with `fireAt <= nowMs`, oldest first. */
+  due(nowMs: number): ScheduledAppointmentReminder[] {
+    const ready = this.pending().filter((entry) => Date.parse(entry.fireAt) <= nowMs);
+    for (const entry of ready) this.entries.delete(entry.jobId);
+    return ready;
+  }
+}
+
+/** Builds the schedulable entry, or `null` when the fire time already passed. */
+export function buildScheduledReminder(
+  input: AppointmentReminderInput,
+): ScheduledAppointmentReminder | null {
+  const fireAt = reminderFireAtIso(input.startsAt);
+  if (fireAt === null) return null;
+  return {
+    jobId: reminderJobId(input.appointmentId),
+    tenantId: input.tenantId,
+    appointmentId: input.appointmentId,
+    channel: input.channel,
+    template: NOTIFY_REMINDER_TEMPLATE,
+    to: input.to,
+    payload: {
+      appointmentId: input.appointmentId,
+      patientId: input.patientId,
+      startsAt: input.startsAt,
+    },
+    timezone: normalizeReminderTimezone(input.timezone),
+    fireAt,
+  };
+}
+
+/**
+ * Schedules the deferred 24h notice on the scheduler. Idempotent by job id:
+ * calling it again for the same appointment (reprogrammed `startsAt`)
+ * replaces the entry, so the patient never gets two notices. Returns
+ * `scheduled: false` — never throws — when the fire time already passed
+ * (visit less than 24h away), the input is unusable, or the scheduler
+ * fails: the appointment write that triggered it must always commit.
+ */
+export async function scheduleAppointmentReminder(
+  scheduler: ReminderScheduler,
+  input: AppointmentReminderInput,
+  nowMs: number = Date.now(),
+): Promise<ReminderScheduleResult> {
+  const jobId = reminderJobId(input.appointmentId);
+  const fail = (reason: string): ReminderScheduleResult => ({
+    scheduled: false,
+    jobId,
+    fireAt: null,
+    reason,
+  });
+  if (
+    typeof input.appointmentId !== 'string' || input.appointmentId.trim() === '' ||
+    typeof input.patientId !== 'string' || input.patientId.trim() === '' ||
+    typeof input.to !== 'string' || input.to.trim() === '' ||
+    (input.channel !== 'email' && input.channel !== 'sms')
+  ) {
+    return fail('invalid_input');
+  }
+  const delayMs = reminderDelayMs(input.startsAt, nowMs);
+  if (delayMs === null) return fail('already_due');
+  const entry = buildScheduledReminder(input);
+  if (entry === null) return fail('already_due');
+  try {
+    await scheduler.schedule(entry);
+  } catch {
+    return fail('scheduler_error');
+  }
+  return { scheduled: true, jobId, fireAt: entry.fireAt, reason: null };
+}
+
+/**
+ * Cancels the deferred notice of one appointment (status change, new date,
+ * cancellation, release). Best-effort and never throws: a missing job is
+ * the common case (the visit was never confirmed), not an error.
+ */
+export async function cancelAppointmentReminder(
+  scheduler: ReminderScheduler,
+  appointmentId: string,
+): Promise<void> {
+  try {
+    await scheduler.cancel(reminderJobId(appointmentId));
+  } catch {
+    // Best-effort: the business write owns the transaction, the notice never blocks it.
+  }
+}
+
+/**
+ * Fire-time guard (P4 decision): only a `confirmed` appointment sends.
+ * Any other status — `scheduled` that never confirmed, `cancelled`,
+ * `no_show`, past clinical states — skips without touching the adapter.
+ */
+export function shouldSendReminder(appointmentStatus: string | null | undefined): boolean {
+  return appointmentStatus === 'confirmed';
+}
+
+/** Terminal write of a fired reminder: the notice the patient received. */
+export const RECORD_REMINDER_SENT_SQL = `INSERT INTO message_log
+  (tenant_id, channel, template, recipient, status, cost, provider_ref)
+VALUES ($1, $2, $3, $4, 'sent', $5, $6)`;
+
+/** Fire-time status read: the guard decides on the live row, not the job. */
+export const SELECT_APPOINTMENT_STATUS_SQL = `SELECT status FROM appointments
+WHERE tenant_id = $1 AND id = $2 LIMIT 1`;
+
+/** Dependencies of the fire-time drain (all injectable for tests). */
+export interface ReminderDrainDependencies {
+  /** Channel adapter (`log` in local/demo; a real provider in prod). */
+  adapter: NotifyAdapter;
+  /** SQL client for the template read and the `sent` row. */
+  client: NotifyRuntimeClient;
+  /** Live status of the appointment (`null` = row gone). */
+  loadAppointmentStatus: (tenantId: string, appointmentId: string) => Promise<string | null>;
+  /** Clock override for deterministic drains under test. */
+  nowMs?: number;
+}
+
+/** Outcome of one fired reminder. */
+export interface ReminderDrainResult {
+  readonly jobId: string;
+  readonly appointmentId: string;
+  /** `sent`, or why nothing went out (`skipped_status`, `skipped_missing`, `failed`). */
+  readonly outcome: 'sent' | 'skipped_status' | 'skipped_missing' | 'failed';
+  readonly providerRef: string | null;
+}
+
+// ============ production 24h reminder fire (P4-3b) ============
+//
+// The API schedules one delayed BullMQ job per confirmed appointment on the
+// `notify-send` queue (job name `REMINDER_JOB_NAME`, deterministic id
+// `reminderJobId`, delay `startsAt - 24h`); `processAppointmentReminderFire`
+// below is what runs when it fires. The job carries the contact + sede zone
+// resolved at schedule time, and firing re-checks the live appointment
+// status first — only a still-`confirmed` visit sends. `createNotifyWorker`
+// dispatches here by job name, so outbox jobs and reminder jobs share the
+// one worker without touching each other's shape.
+
+/** BullMQ job name of the deferred 24h reminder (shares the `notify-send` queue). */
+export const REMINDER_JOB_NAME = 'appointment-reminder-24h';
+
+/** Data the API puts on one deferred reminder job. */
+export interface AppointmentReminderJobData {
+  readonly tenantId: string;
+  readonly appointmentId: string;
+  readonly channel: string;
+  /** Template `code` rendered at fire time (always the 24h reminder). */
+  readonly template: string;
+  /** Destination address (the SQL `recipient` column at send time). */
+  readonly to: string;
+  readonly payload: AppointmentReminderPayload;
+  /** Sede zone used to render `{{startsAtLocal}}` (`org_nodes.timezone`, Lima fallback). */
+  readonly timezone: string;
+}
+
+/** Outcome of one fired production reminder. */
+export interface ReminderFireResult {
+  readonly appointmentId: string;
+  /** `sent`, or why nothing went out (`skipped_status`, `skipped_missing`, `failed`). */
+  readonly outcome: 'sent' | 'skipped_status' | 'skipped_missing' | 'failed';
+  readonly providerRef: string | null;
+}
+
+/**
+ * Dependencies of one production fire (all injectable for tests — no `pg`
+ * import here; the entrypoint wires the pool).
+ */
+export interface ReminderFireDependencies {
+  /** Channel adapter (`log` in local/demo; a real provider in prod). */
+  adapter: NotifyAdapter;
+  /** SQL client for the template read, the status re-check and the `sent` row. */
+  client: NotifyRuntimeClient;
+  /** Live status of the appointment (`null` = row gone). */
+  loadAppointmentStatus: (tenantId: string, appointmentId: string) => Promise<string | null>;
+  /** Clock override for deterministic fires under test. */
+  nowMs?: number;
+}
+
+/**
+ * True when the data looks like a deferred reminder job (never throws).
+ */
+export function isAppointmentReminderJobData(data: unknown): data is AppointmentReminderJobData {
+  if (typeof data !== 'object' || data === null) return false;
+  const record = data as Record<string, unknown>;
+  const blank = (value: unknown): boolean =>
+    typeof value !== 'string' || value.trim() === '';
+  return (
+    !blank(record.tenantId) &&
+    !blank(record.appointmentId) &&
+    (record.channel === 'email' || record.channel === 'sms') &&
+    !blank(record.template) &&
+    !blank(record.to) &&
+    typeof record.payload === 'object' && record.payload !== null &&
+    !blank(record.timezone)
+  );
+}
+
+/**
+ * Fires one deferred reminder: re-checks the live appointment status, and —
+ * only for `confirmed` — renders the active 24h template (with
+ * `{{startsAtLocal}}` in sede time) and delivers through the adapter,
+ * recording one `sent` `message_log` row. Anything else skips silently.
+ * Never throws: adapter throws, transport errors and SQL failures all
+ * surface as `failed`, so one bad destination cannot crash the worker. A
+ * missing template is `failed` too: another try would render the same
+ * nothing, and a late duplicate notice is worse than a missed one.
+ */
+export async function processAppointmentReminderFire(
+  data: AppointmentReminderJobData,
+  deps: ReminderFireDependencies,
+): Promise<ReminderFireResult> {
+  const failed = (providerRef: string | null = null): ReminderFireResult => ({
+    appointmentId:
+      typeof data?.appointmentId === 'string' ? data.appointmentId : '',
+    outcome: 'failed',
+    providerRef,
+  });
+  try {
+    let status: string | null;
+    try {
+      status = await deps.loadAppointmentStatus(data.tenantId, data.appointmentId);
+    } catch {
+      return failed();
+    }
+    if (status === null) {
+      return { appointmentId: data.appointmentId, outcome: 'skipped_missing', providerRef: null };
+    }
+    if (!shouldSendReminder(status)) {
+      return { appointmentId: data.appointmentId, outcome: 'skipped_status', providerRef: null };
+    }
+    const templateResult = await deps.client.query(SELECT_ACTIVE_NOTIFY_TEMPLATE_SQL, [
+      data.tenantId,
+      data.channel,
+      data.template,
+    ]);
+    const templateBody = readRows(templateResult)[0]?.body;
+    if (typeof templateBody !== 'string' || templateBody === '') {
+      return failed();
+    }
+    const body = renderNotifyBody(templateBody, {
+      ...(data.payload as Record<string, unknown>),
+      startsAtLocal: formatInstantInTimezone(data.payload.startsAt, data.timezone),
+    });
+    let send: Awaited<ReturnType<NotifyAdapter['send']>>;
+    try {
+      send = await deps.adapter.send({ channel: data.channel, to: data.to, body });
+    } catch {
+      return failed();
+    }
+    if (!send.ok) {
+      return failed();
+    }
+    try {
+      await deps.client.query(RECORD_REMINDER_SENT_SQL, [
+        data.tenantId,
+        data.channel,
+        data.template,
+        data.to,
+        send.cost,
+        send.providerRef,
+      ]);
+    } catch {
+      return failed(send.providerRef);
+    }
+    return { appointmentId: data.appointmentId, outcome: 'sent', providerRef: send.providerRef };
+  } catch {
+    return failed();
+  }
+}
+
+/**
+ * Drains every due deferred reminder: pops the entries whose fire time
+ * reached `nowMs`, re-checks the live appointment status, and — only for
+ * `confirmed` — renders the active 24h template (with `{{startsAtLocal}}`
+ * in sede time) and delivers through the adapter, recording one `sent`
+ * `message_log` row. Anything else skips silently: a released `scheduled`
+ * visit, a cancelled visit or a deleted row produces no notice, no row, no
+ * adapter call. Adapter throws and transport errors count as `failed` —
+ * they never throw past this boundary, so one bad destination cannot crash
+ * the worker. A missing template is `failed` too: another try would render
+ * the same nothing.
+ */
+export async function drainDueReminders(
+  scheduler: InMemoryReminderScheduler,
+  deps: ReminderDrainDependencies,
+): Promise<ReminderDrainResult[]> {
+  const nowMs = deps.nowMs ?? Date.now();
+  const results: ReminderDrainResult[] = [];
+  for (const entry of scheduler.due(nowMs)) {
+    // Same production fire path the BullMQ worker runs (P4-3b): one entry
+    // carries exactly one job's data, so the drain stays byte-identical.
+    const fired = await processAppointmentReminderFire(entry, deps);
+    results.push({
+      jobId: entry.jobId,
+      appointmentId: fired.appointmentId,
+      outcome: fired.outcome,
+      providerRef: fired.providerRef,
+    });
+  }
+  return results;
 }

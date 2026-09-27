@@ -76,11 +76,20 @@ export const NOTIFY_ADMIN_ROLES = ['ti_admin', 'direccion'] as const;
 export const NOTIFY_TEMPLATE_INVOICE_ISSUED = 'invoice.issued';
 
 /**
- * Template `code` the salud emitter enqueues on `appointment.created`
- * (channel `email` when the patient has an email, `sms` when only a phone
- * is on file). Mirrored in `packages/contracts/src/notify.ts`.
+ * Template `code` the salud emitter enqueues when an appointment is
+ * scheduled (channel `email` when the patient has an email, `sms` when only
+ * a phone is on file). Mirrored in `packages/contracts/src/notify.ts`.
  */
 export const NOTIFY_TEMPLATE_APPOINTMENT_SCHEDULED = 'appointment.scheduled';
+
+/**
+ * Template `code` of the deferred 24h notice (P4-3): one delayed job per
+ * confirmed appointment, fired at `startsAt - 24h`. One `active` version
+ * per channel (`email`, `sms`), seeded per tenant by migration 012.
+ * Mirrored in `packages/contracts/src/notify.ts` and
+ * `apps/workers/src/queues.ts` (`NOTIFY_REMINDER_TEMPLATE`).
+ */
+export const NOTIFY_TEMPLATE_APPOINTMENT_REMINDER_24H = 'appointment.reminder_24h';
 
 /** Rows a list endpoint returns at most; keeps a stray wide scan bounded. */
 export const NOTIFY_LIST_LIMIT = 200;
@@ -652,6 +661,281 @@ export async function enqueueNotify(
   return mapMessageRow(row);
 }
 
+// ============ deferred 24h appointment reminder (P4-3b) ============
+//
+// BullMQ-backed deferred emitter: the API side of the 24h notice.
+// `salud.service` resolves the contact + the sede zone and calls
+// `tryEnqueueReminder` when a visit confirms (or a confirmed visit moves);
+// the hook adds one delayed job on the `notify-send` queue (delay
+// `startsAt - 24h`, deterministic id `reminderJobIdFor`), and the workers
+// host fires it — only a still-`confirmed` appointment sends (the fire-time
+// guard in `apps/workers/src/notify-send.ts` owns that decision and the
+// delivery through the log adapter). Cancelling removes the delayed job by
+// the same id, so reprogramming replaces the notice instead of doubling it.
+//
+// The queue is lazy and fail-soft: without `REDIS_URL` (or when the broker
+// is unreachable) the hooks skip silently with `scheduled: false`, like the
+// rest of the best-effort emitters — the appointment write always commits.
+// Tests inject a fake through `__setReminderQueueForTests` and never touch
+// a broker.
+//
+// Pure math (`reminderJobIdFor` / `reminderDelayMsFor`) mirrors
+// `apps/workers/src/queues.ts` byte-for-byte (same deliberate duplication
+// as the template renderer); the copies must stay identical.
+
+/** Lead time of the deferred notice: exactly 24 hours before the visit. */
+export const REMINDER_LEAD_TIME_MS = 24 * 60 * 60 * 1000;
+
+/** Payload a deferred reminder carries (mirrors the contracts schema). */
+export interface AppointmentReminderPayload {
+  readonly appointmentId: string;
+  readonly patientId: string;
+  readonly startsAt: string | null;
+}
+
+/** Input `tryEnqueueReminder` schedules (contact + sede zone resolved by the emitter). */
+export interface ReminderEnqueueInput {
+  readonly tenantId: string;
+  readonly appointmentId: string;
+  readonly patientId: string;
+  readonly startsAt: string | null;
+  readonly channel: string;
+  readonly to: string;
+  readonly timezone?: string;
+}
+
+/** BullMQ queue carrying the deferred reminders (drained by the workers host). */
+export const NOTIFY_SEND_QUEUE = 'notify-send';
+
+/** Job name of the deferred reminder (the worker dispatches by name). */
+export const REMINDER_JOB_NAME = 'appointment-reminder-24h';
+
+/**
+ * Data one deferred reminder job carries. Mirrors `AppointmentReminderJobData`
+ * in `apps/workers/src/notify-send.ts` (same deliberate duplication as the
+ * template renderer); the copies must stay identical.
+ */
+export interface AppointmentReminderJobData {
+  readonly tenantId: string;
+  readonly appointmentId: string;
+  readonly channel: string;
+  readonly template: string;
+  readonly to: string;
+  readonly payload: AppointmentReminderPayload;
+  readonly timezone: string;
+}
+
+/** Minimal queue surface the reminder hooks need (real BullMQ or fake). */
+export interface ReminderQueueLike {
+  addReminder(data: AppointmentReminderJobData, delayMs: number, jobId: string): Promise<void>;
+  removeReminder(jobId: string): Promise<boolean>;
+}
+
+/** Structural BullMQ queue (only the two methods the hooks touch). */
+interface BullMqQueueShape {
+  add(name: string, data: unknown, options: Record<string, unknown>): Promise<unknown>;
+  getJob(jobId: string): Promise<{ remove(): Promise<void> } | null | undefined>;
+}
+
+/**
+ * `ReminderQueueLike` over a real BullMQ queue. Adds replace by job id
+ * (remove-then-add: reprogramming a confirmed visit replaces its reminder
+ * instead of stacking a second notice); removals of missing jobs read false.
+ */
+class BullMqReminderQueue implements ReminderQueueLike {
+  private readonly queue: BullMqQueueShape;
+
+  constructor(queue: BullMqQueueShape) {
+    this.queue = queue;
+  }
+
+  async addReminder(data: AppointmentReminderJobData, delayMs: number, jobId: string): Promise<void> {
+    try {
+      const existing = await this.queue.getJob(jobId);
+      if (existing !== null && existing !== undefined) await existing.remove();
+    } catch {
+      // Fall through to the add: a stale read must not lose the reminder.
+    }
+    await this.queue.add(REMINDER_JOB_NAME, data, {
+      delay: delayMs,
+      jobId,
+      attempts: 1,
+      removeOnComplete: 1000,
+      removeOnFail: 5000,
+    });
+  }
+
+  async removeReminder(jobId: string): Promise<boolean> {
+    const existing = await this.queue.getJob(jobId);
+    if (existing === null || existing === undefined) return false;
+    await existing.remove();
+    return true;
+  }
+}
+
+/** Test seam: an injected queue (or an injected `null` = no broker). */
+let reminderQueueOverride: ReminderQueueLike | null | undefined;
+/** Cached real queue, built once from `REDIS_URL`. */
+let reminderQueueReal: ReminderQueueLike | null | undefined;
+
+/**
+ * Test seam: injects the queue the hooks talk to (`null` forces the
+ * no-broker path). Suites own their fake per test; production never calls it.
+ */
+export function __setReminderQueueForTests(queue: ReminderQueueLike | null): void {
+  reminderQueueOverride = queue;
+}
+
+/**
+ * Test seam: drops the injected queue and the cached real one, so suites
+ * sharing the process isolate from each other.
+ */
+export function __resetReminderQueueForTests(): void {
+  reminderQueueOverride = undefined;
+  reminderQueueReal = undefined;
+}
+
+/**
+ * Builds the real queue from `REDIS_URL`, or null when there is no broker
+ * (or the packages cannot load). `bullmq` is imported lazily so this module
+ * — and its tests — load without a Redis connection, exactly like the
+ * workers `queues.ts` split.
+ */
+async function buildRealReminderQueue(): Promise<ReminderQueueLike | null> {
+  const redisUrl = (process.env.REDIS_URL ?? '').trim();
+  if (redisUrl === '') return null;
+  try {
+    const { Queue } = (await import('bullmq')) as unknown as {
+      Queue: new (name: string, options: unknown) => BullMqQueueShape;
+    };
+    const ioredis = (await import('ioredis')) as unknown as {
+      default: new (url: string, options: unknown) => unknown;
+    };
+    const connection = new ioredis.default(redisUrl, { maxRetriesPerRequest: null });
+    return new BullMqReminderQueue(new Queue(NOTIFY_SEND_QUEUE, { connection }));
+  } catch {
+    return null;
+  }
+}
+
+/** The queue the hooks talk to: the injected fake under test, else the lazy real one. */
+async function getReminderQueue(): Promise<ReminderQueueLike | null> {
+  if (reminderQueueOverride !== undefined) return reminderQueueOverride;
+  if (reminderQueueReal !== undefined) return reminderQueueReal;
+  reminderQueueReal = await buildRealReminderQueue();
+  return reminderQueueReal;
+}
+
+/** Fallback sede zone (mirrors `REMINDER_DEFAULT_TIMEZONE` in the workers). */
+const REMINDER_FALLBACK_TIMEZONE = 'America/Lima';
+
+/** Answer of one schedule attempt (never throws — see `tryEnqueueReminder`). */
+export interface ReminderEnqueueResult {
+  readonly scheduled: boolean;
+  readonly jobId: string;
+  readonly fireAt: string | null;
+  readonly reason: string | null;
+}
+
+/**
+ * Deterministic job id of one appointment's deferred reminder. Stable
+ * across reschedules, so reprogramming replaces the entry instead of
+ * doubling the notice. Mirrors `reminderJobId` in the workers.
+ */
+export function reminderJobIdFor(appointmentId: string): string {
+  return `appointment-reminder-24h:${appointmentId}`;
+}
+
+/**
+ * Delay in milliseconds from `nowMs` until `startsAt - 24h`, or `null`
+ * when nothing should be scheduled (unparseable `startsAt`, or a fire time
+ * already reached/passed). Pure instant math, timezone-independent.
+ * Mirrors `reminderDelayMs` in the workers.
+ */
+export function reminderDelayMsFor(startsAtIso: string | null, nowMs: number): number | null {
+  if (typeof startsAtIso !== 'string' || startsAtIso.trim() === '') return null;
+  const startsAtMs = Date.parse(startsAtIso);
+  if (Number.isNaN(startsAtMs)) return null;
+  const delayMs = startsAtMs - REMINDER_LEAD_TIME_MS - nowMs;
+  return delayMs > 0 ? delayMs : null;
+}
+
+/**
+ * Schedules the deferred 24h notice of one appointment as a delayed BullMQ
+ * job (delay `startsAt - 24h`, deterministic id). Replaces by job id:
+ * confirming, then reprogramming, the same visit replaces the job — the
+ * patient never gets two notices. Never throws: an unusable input, a fire
+ * time already passed (visit less than 24h away), a missing broker or any
+ * queue failure resolves to `scheduled: false`, so the appointment write
+ * that triggered it always commits.
+ */
+export async function tryEnqueueReminder(
+  input: ReminderEnqueueInput,
+  nowMs: number = Date.now(),
+): Promise<ReminderEnqueueResult> {
+  const jobId = reminderJobIdFor(input.appointmentId);
+  const fail = (reason: string): ReminderEnqueueResult => ({
+    scheduled: false,
+    jobId,
+    fireAt: null,
+    reason,
+  });
+  if (
+    typeof input.appointmentId !== 'string' || input.appointmentId.trim() === '' ||
+    typeof input.patientId !== 'string' || input.patientId.trim() === '' ||
+    typeof input.to !== 'string' || input.to.trim() === '' ||
+    (input.channel !== 'email' && input.channel !== 'sms')
+  ) {
+    return fail('invalid_input');
+  }
+  const delayMs = reminderDelayMsFor(input.startsAt, nowMs);
+  if (delayMs === null) return fail('already_due');
+  const startsAtMs = Date.parse(input.startsAt as string);
+  if (Number.isNaN(startsAtMs)) return fail('already_due');
+  const fireAt = new Date(startsAtMs - REMINDER_LEAD_TIME_MS).toISOString();
+  const data: AppointmentReminderJobData = {
+    tenantId: input.tenantId,
+    appointmentId: input.appointmentId,
+    channel: input.channel,
+    template: NOTIFY_TEMPLATE_APPOINTMENT_REMINDER_24H,
+    to: input.to.trim(),
+    payload: {
+      appointmentId: input.appointmentId,
+      patientId: input.patientId,
+      startsAt: input.startsAt,
+    },
+    timezone:
+      typeof input.timezone === 'string' && input.timezone.trim() !== ''
+        ? input.timezone
+        : REMINDER_FALLBACK_TIMEZONE,
+  };
+  try {
+    const queue = await getReminderQueue();
+    if (queue === null) return fail('scheduler_error');
+    await queue.addReminder(data, delayMs, jobId);
+  } catch {
+    return fail('scheduler_error');
+  }
+  return { scheduled: true, jobId, fireAt, reason: null };
+}
+
+/**
+ * Cancels the deferred notice of one appointment (status change, new date,
+ * cancellation, release) by removing its delayed job. Never throws: a
+ * missing broker, a missing job (the common case — the visit was never
+ * confirmed) or any queue failure reads false. Returns true when a job was
+ * held and removed.
+ */
+export async function tryCancelReminder(appointmentId: string): Promise<boolean> {
+  try {
+    const queue = await getReminderQueue();
+    if (queue === null) return false;
+    return await queue.removeReminder(reminderJobIdFor(appointmentId));
+  } catch {
+    return false;
+  }
+}
+
 // ============ worker-owned status transitions ============
 
 /**
@@ -728,7 +1012,6 @@ export function markSent(
 ): Promise<NotifyMessageRecord> {
   return transitionMessage(client, tenantId, id, ['queued'], 'sent', mark, traceId);
 }
-
 /** `sent → delivered`: the provider confirmed the delivery. */
 export function markDelivered(
   client: NotifyClient,

@@ -148,3 +148,109 @@ export function nextRetryDelay(queue: QueueName, attempt: number): number | null
 export function maxAttempts(queue: QueueName): number {
   return QUEUE_CONFIGS[queue].maxAttempts;
 }
+
+// ============ deferred 24h appointment reminder (P4-3) ============
+//
+// Pure scheduling contract of the deferred reminder: one delayed
+// `notify-send` job per confirmed appointment, fired at `startsAt - 24h`.
+// The deterministic job id makes rescheduling idempotent (reprogramming
+// overwrites the same job instead of stacking a second notice) and gives
+// cancellation one place to land. Only `confirmed` appointments ever send:
+// the fire-time guard (`shouldSendReminder` in `notify-send.ts`) drops any
+// job whose appointment left `confirmed`, and the API-side release sweep
+// cancels `scheduled` rows that never confirmed.
+//
+// The 24h lead is instant math (`startsAt - 24h`), so it needs no timezone;
+// the sede zone (`org_nodes.timezone`, Lima fallback) only decides how the
+// instant reads in the patient-facing message (`formatInstantInTimezone`).
+// The API mirrors `reminderJobId` / `reminderDelayMs` in
+// `apps/api/src/notify/notify.service.ts` (same deliberate duplication as
+// the template renderer); the three copies must stay byte-identical.
+
+/**
+ * Template `code` of the deferred 24h notice. Mirrors
+ * `NOTIFY_TEMPLATE_APPOINTMENT_REMINDER_24H` in `packages/contracts` and
+ * `apps/api/src/notify/notify.service.ts`.
+ */
+export const NOTIFY_REMINDER_TEMPLATE = 'appointment.reminder_24h' as const;
+
+/** Lead time of the deferred notice: exactly 24 hours before the visit. */
+export const REMINDER_LEAD_TIME_MS = 24 * 60 * 60 * 1000;
+
+/** Fallback sede zone; mirrors migration 010 and the API `ORG_DEFAULT_TIMEZONE`. */
+export const REMINDER_DEFAULT_TIMEZONE = 'America/Lima';
+
+/**
+ * Deterministic BullMQ job id of one appointment's deferred reminder.
+ * Stable across reschedules, so reprogramming replaces the job instead of
+ * doubling the notice, and cancelling needs only the appointment id.
+ */
+export function reminderJobId(appointmentId: string): string {
+  return `appointment-reminder-24h:${appointmentId}`;
+}
+
+/**
+ * Delay in milliseconds from `nowMs` until the reminder fire time
+ * (`startsAt - 24h`), or `null` when no job should be scheduled: an
+ * unparseable `startsAt`, or a fire time already reached/passed (the visit
+ * is less than 24h away — there is nothing deferred left to schedule).
+ * Pure instant math: the 24h lead is timezone-independent.
+ */
+export function reminderDelayMs(startsAtIso: string | null, nowMs: number): number | null {
+  if (typeof startsAtIso !== 'string' || startsAtIso.trim() === '') return null;
+  const startsAtMs = Date.parse(startsAtIso);
+  if (Number.isNaN(startsAtMs)) return null;
+  const delayMs = startsAtMs - REMINDER_LEAD_TIME_MS - nowMs;
+  return delayMs > 0 ? delayMs : null;
+}
+
+/** ISO instant the reminder fires (`startsAt - 24h`), or `null` when unparseable. */
+export function reminderFireAtIso(startsAtIso: string | null): string | null {
+  if (typeof startsAtIso !== 'string' || startsAtIso.trim() === '') return null;
+  const startsAtMs = Date.parse(startsAtIso);
+  if (Number.isNaN(startsAtMs)) return null;
+  return new Date(startsAtMs - REMINDER_LEAD_TIME_MS).toISOString();
+}
+
+/** True when `value` names a usable IANA timezone (backed by `Intl`). */
+export function isUsableTimezone(value: unknown): boolean {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Usable zone or the Lima fallback (never throws). */
+export function normalizeReminderTimezone(value: unknown): string {
+  return isUsableTimezone(value) ? (value as string) : REMINDER_DEFAULT_TIMEZONE;
+}
+
+/**
+ * Formats one UTC instant for the patient message in the sede zone
+ * (`YYYY-MM-DD HH:mm`), so the notice reads sede time, never UTC.
+ * Falls back to Lima on a bad instant or zone (never throws): a reminder
+ * with a readable fallback time beats a crashed send.
+ */
+export function formatInstantInTimezone(iso: string | null, timezone: unknown): string {
+  const zone = normalizeReminderTimezone(timezone);
+  const time = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
+  if (Number.isNaN(time)) return '';
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: zone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(time));
+    const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+  } catch {
+    return new Date(time).toISOString();
+  }
+}

@@ -29,7 +29,7 @@ import {
   loadActiveDefs,
   validateCustomValues,
 } from '../custom-fields/custom-fields.service.ts';
-import { NOTIFY_TEMPLATE_APPOINTMENT_SCHEDULED, tryEnqueueNotify } from '../notify/notify.service.ts';
+import { NOTIFY_TEMPLATE_APPOINTMENT_SCHEDULED, tryCancelReminder, tryEnqueueNotify, tryEnqueueReminder } from '../notify/notify.service.ts';
 import { assertTransition } from '../state-transitions/state-transitions.service.ts';
 import type { HeaderRecord, TenantScopedRequest } from '../tenant/tenant.middleware.ts';
 
@@ -1279,6 +1279,11 @@ export async function createAppointment(
   // follows the contact data on file (email first, sms fallback); a patient
   // without either address — or without an active template — skips silently.
   await tryNotifyAppointmentScheduled(actor, appointment);
+  // P4-3: a visit created already `confirmed` arms its deferred notice;
+  // today creates always land `scheduled`, so this is future-proofing.
+  if (appointment.status === 'confirmed') {
+    await tryScheduleReminder(actor, appointment);
+  }
   return appointment;
 }
 
@@ -1351,6 +1356,11 @@ export async function getAppointment(
 const UPDATE_APPOINTMENT_STATUS_SQL = `UPDATE appointments
 SET status = $3
 WHERE tenant_id = $1 AND id = $2
+RETURNING ${APPOINTMENT_COLUMNS}`;
+
+const RELEASE_APPOINTMENT_SQL = `UPDATE appointments
+SET status = $3
+WHERE tenant_id = $1 AND id = $2 AND status = 'scheduled'
 RETURNING ${APPOINTMENT_COLUMNS}`;
 
 const RESCHEDULE_APPOINTMENT_SQL = `UPDATE appointments
@@ -1450,6 +1460,13 @@ async function changeAppointmentStatus(
     orgNodeId: updated.orgNodeId,
     diff: { from: appointment.status, to: updated.status },
   });
+  // P4-3: confirming arms the deferred 24h notice; any other move disarms
+  // it (a released, cancelled or attended visit must never remind).
+  if (to === 'confirmed') {
+    await tryScheduleReminder(actor, updated);
+  } else {
+    await tryCancelAppointmentReminder(actor, updated);
+  }
   return updated;
 }
 
@@ -1480,28 +1497,92 @@ export async function updateAppointmentStatus(
 
 /**
  * P4-3 hook: schedules the 24h reminder of a confirmed appointment.
- * No-op until P4-3 wires the BullMQ deferred notice; `createAppointment`
- * keeps its best-effort `appointment.scheduled` notice, and rescheduling
- * cancels the deferred one through `tryCancelAppointmentReminder` below.
- * The new notice for the moved `startsAt` is P4-3's job, not this slice's.
+ * Best-effort and never throws: only `confirmed` visits schedule (P4
+ * decision — a `scheduled` visit that never confirms is released, never
+ * reminded); the channel follows the contact data on file (email first,
+ * sms fallback; no address, no schedule); the fire time is `startsAt - 24h`
+ * and a visit less than 24h away schedules nothing. The sede zone rides on
+ * the entry so the worker renders `{{startsAtLocal}}` in sede time.
  */
 export async function tryScheduleReminder(
-  _actor: ActorContext,
-  _appointment: AppointmentRecord,
+  actor: ActorContext,
+  appointment: AppointmentRecord,
 ): Promise<void> {
-  return undefined;
+  try {
+    if (appointment.status !== 'confirmed') return;
+    const patient = await findPatient(actor, appointment.patientId);
+    if (patient === null) return;
+    const email = readContactAddress(patient.contacts, ['email']);
+    const phone = readContactAddress(patient.contacts, ['phone']);
+    const channel = email !== null ? 'email' : phone !== null ? 'sms' : null;
+    const to = email ?? phone;
+    if (channel === null || to === null) return;
+    const timezone = await loadSedeTimezone(actor, appointment.orgNodeId);
+    await tryEnqueueReminder({
+      tenantId: actor.tenantId,
+      appointmentId: appointment.id,
+      patientId: appointment.patientId,
+      startsAt: appointment.startsAt,
+      channel,
+      to,
+      timezone,
+    });
+  } catch {
+    // Best-effort: the appointment write owns the transaction, the notice never blocks it.
+  }
 }
 
 /**
  * P4-3 hook: cancels the deferred 24h notice of an appointment that is being
- * rescheduled (or moved out of `confirmed`). No-op until P4-3 owns the
- * BullMQ queue; kept as a named call-site so the wiring has one place to land.
+ * rescheduled (the fresh notice for the new `startsAt` is scheduled right
+ * after) or moved out of `confirmed`. Never throws; a missing entry is the
+ * common case, not an error.
  */
 export async function tryCancelAppointmentReminder(
   _actor: ActorContext,
-  _appointment: AppointmentRecord,
+  appointment: AppointmentRecord,
 ): Promise<void> {
-  return undefined;
+  try {
+    await tryCancelReminder(appointment.id);
+  } catch {
+    // Best-effort: cancellation must never break the appointment write.
+  }
+}
+
+/**
+ * Fallback sede zone (P4-1a/010): mirrors `org_nodes.timezone` default and
+ * `ORG_DEFAULT_TIMEZONE` in `dashboards.service.ts`. Kept local so this
+ * module has no cross-service import; the value must stay `America/Lima`.
+ */
+export const SALUD_DEFAULT_TIMEZONE = 'America/Lima';
+
+const SELECT_SEDE_TIMEZONE_SQL =
+  'SELECT timezone FROM org_nodes WHERE tenant_id = $1 AND id = $2 LIMIT 1';
+
+/** True when `value` is a usable IANA timezone (backed by `Intl`). */
+function isUsableSedeTimezone(value: unknown): boolean {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Zone of one sede for the reminder entry. An unknown sede, a missing
+ * column (pre-010 database) or an unusable stored value all read as Lima —
+ * scheduling never turns a zone lookup into a 500. Never throws.
+ */
+async function loadSedeTimezone(actor: ActorContext, orgNodeId: string): Promise<string> {
+  try {
+    const result = await actor.client.query(SELECT_SEDE_TIMEZONE_SQL, [actor.tenantId, orgNodeId]);
+    const stored = readRows(result)[0]?.timezone;
+    return isUsableSedeTimezone(stored) ? (stored as string) : SALUD_DEFAULT_TIMEZONE;
+  } catch {
+    return SALUD_DEFAULT_TIMEZONE;
+  }
 }
 
 /**
@@ -1554,9 +1635,13 @@ export async function rescheduleAppointment(
     throw new HttpException({ code: 'write.failed', message: 'Appointment reschedule returned no row', traceId: actor.traceId }, 500);
   }
   const updated = mapAppointment(row);
-  // The moved visit keeps its slot notice lifecycle: drop the deferred one
-  // (P4-3 owns the queue; the fresh notice for the new `startsAt` is P4-3's).
+  // The moved visit keeps its slot notice lifecycle: drop the deferred one,
+  // then arm the fresh one for the new `startsAt` when still confirmed —
+  // the deterministic job id makes the replace idempotent (no double notice).
   await tryCancelAppointmentReminder(actor, appointment);
+  if (updated.status === 'confirmed') {
+    await tryScheduleReminder(actor, updated);
+  }
   await writeAudit(actor, membership, {
     action: 'appointment.rescheduled',
     entity: 'appointment',
@@ -1565,6 +1650,71 @@ export async function rescheduleAppointment(
     diff: { from: appointment.startsAt, to: updated.startsAt, durationMin: updated.durationMin },
   });
   return updated;
+}
+
+/**
+ * Frees the slots that never confirmed (P4-3, P4 decision: the 24h notice
+ * goes to `confirmed` only, so a `scheduled` visit still waiting past its
+ * start never reminds — it releases). In production this runs as the
+ * workers 15-min repeatable (`release-sweep.ts`); the function stays
+ * exported for tests and manual desk runs.
+ *
+ * Every `scheduled` appointment in the membership subtree whose `startsAt`
+ * already passed moves to `cancelled` with one `appointment.released` audit
+ * row each (diff carries `reason: 'unconfirmed_window_passed'` plus the
+ * missed start, so the trail distinguishes a release from a desk
+ * cancellation). Any leftover deferred entry is dropped as a safety net —
+ * a never-confirmed visit should hold none, and a released one must never
+ * remind. The sweep needs the desk role (`appointment.write` over the
+ * membership subtree); anybody else is denied and the denial is audited.
+ * `nowMs` is injectable so tests control the clock.
+ */
+export async function releaseUnconfirmedAppointments(
+  actor: ActorContext,
+  nowMs: number = Date.now(),
+): Promise<AppointmentRecord[]> {
+  const facts = await loadFacts(actor);
+  const membership = await authorize(actor, facts, {
+    action: 'appointment.write',
+    entity: 'appointment',
+    orgNodeId: facts.membership?.orgNodeId ?? actor.tenantId,
+    attemptedAction: 'appointment.release',
+  });
+  const cutoff = new Date(nowMs).toISOString();
+  const found = await actor.client.query(
+    `SELECT ${APPOINTMENT_COLUMNS} FROM appointments
+WHERE tenant_id = $1 AND org_node_id = ANY($2::uuid[])
+  AND status = 'scheduled' AND starts_at < $3
+ORDER BY starts_at ASC`,
+    [actor.tenantId, [...facts.scopeSubtree], cutoff],
+  );
+  const released: AppointmentRecord[] = [];
+  for (const candidate of readRows(found)) {
+    const appointment = mapAppointment(candidate);
+    const result = await actor.client.query(RELEASE_APPOINTMENT_SQL, [
+      actor.tenantId,
+      appointment.id,
+      'cancelled',
+    ]);
+    const row = readRows(result)[0];
+    if (row === undefined) continue; // lost race: confirmed after SELECT
+    const updated = mapAppointment(row);
+    await tryCancelAppointmentReminder(actor, updated);
+    await writeAudit(actor, membership, {
+      action: 'appointment.released',
+      entity: 'appointment',
+      entityId: updated.id,
+      orgNodeId: updated.orgNodeId,
+      diff: {
+        from: 'scheduled',
+        to: 'cancelled',
+        reason: 'unconfirmed_window_passed',
+        startsAt: appointment.startsAt,
+      },
+    });
+    released.push(updated);
+  }
+  return released;
 }
 
 /**
