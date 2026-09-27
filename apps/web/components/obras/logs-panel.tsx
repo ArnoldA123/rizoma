@@ -17,7 +17,8 @@ import { CharCounter, LiveField } from '@/components/ui/field-feedback';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { formatUtcStamp } from '@/lib/format';
+import { formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { siteLogStatusLabel, siteLogStatusVariant } from '@/lib/labels';
 import { createSiteLog, listSiteLogs, listSiteStaff, publishSiteLog } from '@/lib/obras-api';
 import { useResource } from '@/lib/use-resource';
@@ -61,6 +62,10 @@ export function LogsPanel({ siteId, canMark, className }: LogsPanelProps) {
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // Log rows carry no sede of their own and the panel receives no orgNodeId:
+  // the stamps read in the first-sede zone, Lima fallback meanwhile (P4-1d
+  // respaldo Lima).
+  const sede = useSedeTimezone(null);
 
   const logs = useResource<SiteLogRecord[]>(`obras-logs:${siteId}`, (signal) =>
     listSiteLogs(siteId, signal),
@@ -121,7 +126,7 @@ export function LogsPanel({ siteId, canMark, className }: LogsPanelProps) {
       setTouched({});
       setSubmitted(false);
       setSuccess(
-        `Entrada creada como «${siteLogStatusLabel(created.status)}» (${formatUtcStamp(created.at)}). Un borrador solo es visible para quien puede leer la bitácora de la obra; publicarlo es el paso siguiente.`,
+        `Entrada creada como «${siteLogStatusLabel(created.status)}» (${formatSedeStamp(created.at, sede.timezone)}). Un borrador solo es visible para quien puede leer la bitácora de la obra; publicarlo es el paso siguiente.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -201,7 +206,7 @@ export function LogsPanel({ siteId, canMark, className }: LogsPanelProps) {
                       {siteLogStatusLabel(row.status)}
                     </Badge>
                     <span className="tabular text-xs text-muted-foreground">
-                      {formatUtcStamp(row.at)}
+                      {formatSedeStamp(row.at, sede.timezone)}
                     </span>
                     {row.attachmentIds.length === 0 ? null : (
                       <span className="text-xs text-muted-foreground">
@@ -213,7 +218,7 @@ export function LogsPanel({ siteId, canMark, className }: LogsPanelProps) {
                   <p className="text-[0.9375rem] whitespace-pre-wrap">{row.text}</p>
                   <span className="text-xs text-muted-foreground">
                     {authorNames.get(row.authorId) ?? `Autor ${row.authorId.slice(0, 8)}…`} ·{' '}
-                    {formatUtcStamp(row.at)}
+                    {formatSedeStamp(row.at, sede.timezone)}
                   </span>
                   <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
                     entrada {row.id.slice(0, 8)}… · autor {row.authorId.slice(0, 8)}…

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
   PATIENTS_CSV_COLUMNS,
   PATIENTS_CSV_REQUIRED_COLUMNS,
@@ -20,7 +20,8 @@ import { Input } from '@/components/ui/input';
 import { MagneticCta } from '@/components/ui/magnetic';
 import { EmptyState, FailurePanel } from '@/components/salud/states';
 import { DEV_IDENTITY } from '@/lib/config';
-import { formatUtcStamp, shortId } from '@/lib/format';
+import { formatSedeStamp, shortId } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { importJobStatusLabel } from '@/lib/labels';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
 import { fetchImportErrorsCsv, getImportJob, importPatientsCsv } from '@/lib/salud-api';
@@ -74,10 +75,10 @@ function importKindLabel(kind: string): string {
  * Visible label of a job option: kind, status, date and counters. The id
  * travels as the option value and never reaches the visible text.
  */
-function jobItemLabel(row: ImportJobListItem): string {
+function jobItemLabel(row: ImportJobListItem, timezone: string): string {
   return (
     `${importKindLabel(row.kind)} · ${importJobStatusLabel(row.status)} · ` +
-    `${formatUtcStamp(row.createdAt)} · ${row.rowsOk} aceptadas / ${row.rowsError} rechazadas`
+    `${formatSedeStamp(row.createdAt, timezone)} · ${row.rowsOk} aceptadas / ${row.rowsError} rechazadas`
   );
 }
 
@@ -92,7 +93,14 @@ export function ImportsPanel({ className }: ImportsPanelProps) {
   const [lookupFailure, setLookupFailure] = useState<ApiFailure | null>(null);
   const [lookupBusy, setLookupBusy] = useState(false);
   const [download, setDownload] = useState<DownloadState>({ kind: 'idle' });
-  const [jobItems, setJobItems] = useState<readonly EntityItem[]>([]);
+  // Import jobs carry no sede of their own: the rows read in the zone of the
+  // selected sede (P4-1d, quotes-panel precedent), Lima fallback meanwhile.
+  const sede = useSedeTimezone(orgNodeId !== '' ? orgNodeId : null);
+  const [jobRows, setJobRows] = useState<readonly ImportJobListItem[]>([]);
+  const jobItems: readonly EntityItem[] = useMemo(
+    () => jobRows.map((row) => ({ id: row.id, label: jobItemLabel(row, sede.timezone) })),
+    [jobRows, sede.timezone],
+  );
   const [jobListFailed, setJobListFailed] = useState(false);
   const [jobsToken, setJobsToken] = useState(0);
   const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
@@ -126,12 +134,12 @@ export function ImportsPanel({ className }: ImportsPanelProps) {
     listImportJobs({}, controller.signal)
       .then((rows) => {
         if (!active) return;
-        setJobItems(rows.map((row) => ({ id: row.id, label: jobItemLabel(row) })));
+        setJobRows(rows);
         setJobListFailed(false);
       })
       .catch(() => {
         if (!active) return;
-        setJobItems([]);
+        setJobRows([]);
         setJobListFailed(true);
       });
     return () => {
@@ -379,7 +387,7 @@ export function ImportsPanel({ className }: ImportsPanelProps) {
                   job {job.id} · archivo {shortId(job.fileSha256)}
                 </span>
                 <span className="tabular ml-auto text-xs text-muted-foreground">
-                  {formatUtcStamp(job.createdAt)}
+                  {formatSedeStamp(job.createdAt, sede.timezone)}
                 </span>
               </div>
 

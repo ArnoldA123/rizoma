@@ -27,7 +27,8 @@ import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { formatUtcStamp } from '@/lib/format';
+import { formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { assetStatusLabel, assetStatusVariant } from '@/lib/labels';
 import {
   addAssetReading,
@@ -124,6 +125,9 @@ export function AssetsPanel({
   const [success, setSuccess] = useState<string | null>(null);
   /** Last unit this panel wrote, so the confirmation can state its open transitions. */
   const [lastAsset, setLastAsset] = useState<AssetRecord | null>(null);
+  // Readings carry no sede of their own: the stamp reads in the alta sede
+  // (P4-1d), Lima fallback meanwhile.
+  const sede = useSedeTimezone(defaultOrgNodeId);
   const [sedeItems, setSedeItems] = useState<readonly EntityItem[]>([]);
 
   useEffect(() => {
@@ -254,7 +258,7 @@ export function AssetsPanel({
         value: Number(reading.value.trim()),
       });
       setSuccess(
-        `Lectura ${record.kind} = ${record.value} anotada el ${formatUtcStamp(record.at)}. Las lecturas son de solo inserción: no se editan ni se borran, y una unidad retirada ya no se lee.`,
+        `Lectura ${record.kind} = ${record.value} anotada el ${formatSedeStamp(record.at, sede.timezone)}. Las lecturas son de solo inserción: no se editan ni se borran, y una unidad retirada ya no se lee.`,
       );
       setReading((current) => ({ ...current, value: '' }));
       setTouched({});

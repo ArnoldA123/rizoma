@@ -21,7 +21,8 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/ui/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { formatQuantity, formatUtcStamp } from '@/lib/format';
+import { formatQuantity, formatSedeStamp } from '@/lib/format';
+import { useSedeTimezone } from '@/lib/use-sede-timezone';
 import { createBudgetLine, createMilestone, listBudgetLines, listInventoryItems, listProgressEntries, postProgressEntry } from '@/lib/obras-api';
 import { dateTimeLocalToUtcIso } from '@/lib/salud-time';
 import { useResource } from '@/lib/use-resource';
@@ -94,6 +95,10 @@ export function ProgressPanel({
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<ApiFailure | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // Entries and milestones carry no sede of their own and the panel receives
+  // no orgNodeId: the stamps read in the first-sede zone, Lima fallback
+  // meanwhile (P4-1d respaldo Lima).
+  const sede = useSedeTimezone(null);
 
   const entries = useResource<ProgressEntryRecord[]>(`obras-progress:${siteId}`, (signal) =>
     listProgressEntries({ site: siteId }, signal),
@@ -236,7 +241,7 @@ export function ProgressPanel({
       setTouched({});
       setSubmitted(false);
       setSuccess(
-        `Partida de ${formatQuantity(created.qtyDone)} registrada como «${created.status}» (${formatUtcStamp(created.at)}). El autor se toma del token, no del formulario.`,
+        `Partida de ${formatQuantity(created.qtyDone)} registrada como «${created.status}» (${formatSedeStamp(created.at, sede.timezone)}). El autor se toma del token, no del formulario.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -261,7 +266,7 @@ export function ProgressPanel({
       setTouched({});
       setSubmitted(false);
       setSuccess(
-        `Hito «${created.name}» creado con estado «${created.status}» (${formatUtcStamp(created.dueAt)}). El estado lo decide el reloj de la base: una fecha ya pasada se guarda vencida en lugar de rechazarse.`,
+        `Hito «${created.name}» creado con estado «${created.status}» (${formatSedeStamp(created.dueAt, sede.timezone)}). El estado lo decide el reloj de la base: una fecha ya pasada se guarda vencida en lugar de rechazarse.`,
       );
     } catch (error) {
       setFailure(classifyApiError(error));
@@ -427,7 +432,7 @@ export function ProgressPanel({
                     </span>
                   </div>
                   <span className="tabular text-xs text-muted-foreground">
-                    {formatUtcStamp(row.at)}
+                    {formatSedeStamp(row.at, sede.timezone)}
                   </span>
                 </li>
               ))}
