@@ -89,7 +89,7 @@ export default async function SaludBoardPage({
         </p>
         <p>
           La sede se lee del parámetro <code className="font-mono text-xs">?org=</code> y debe estar
-          dentro del subárbol de la membresía; el día es UTC y se omite para pedir el día de hoy.
+          dentro del subárbol de la membresía; el día es el de la sede y se omite para pedir el día de hoy.
         </p>
         <p>
           MVP1 no tiene réplica de lectura ni caché Redis: la pantalla consulta la conexión de la

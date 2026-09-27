@@ -356,7 +356,7 @@ export function PatientForm({
             <LiveField
               id="patient-birthdate"
               label="Fecha de nacimiento"
-              hint="Opcional. Se guarda como fecha UTC (AAAA-MM-DD)."
+              hint="Opcional. Se guarda como fecha (AAAA-MM-DD)."
               issue={checks.birthdate ?? null}
               touched={show('birthdate')}
             >

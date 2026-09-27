@@ -175,7 +175,7 @@ export function SiteBoardPanel({
         <CardTitle as="h2">Avance, asistencia y pendientes del día</CardTitle>
         <CardDescription>
           El tablero de obra resuelve la misma clave de acceso que el personal: asignación activa o
-          alcance de organización. El día es UTC y el API lo repite en la respuesta, así que el
+          alcance de organización. El día es el de la sede y el API lo repite en la respuesta, así que el
           encabezado siempre dice el día que se está leyendo.
         </CardDescription>
       </CardHeader>
