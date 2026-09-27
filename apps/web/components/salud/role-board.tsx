@@ -423,8 +423,10 @@ function BoardKpis({
         <Kpi label="Cola" value={String(board.queue)} hint="En espera" delta={deltaText(delta, 'queue', previousDate)} />
       </div>
       <p className="text-xs text-muted-foreground">
-        Conteos de recepción: ni importes ni contenido clínico. El tablero de caja y el clínico son
-        contratos separados por diseño, no dos vistas del mismo objeto.
+        Conteos de recepción: ni importes ni contenido clínico. La cola cuenta las citas en
+        espera y en atención; las derivadas salieron de la agenda y no entran en estos
+        conteos. El tablero de caja y el clínico son contratos separados por diseño, no dos
+        vistas del mismo objeto.
       </p>
     </div>
   );

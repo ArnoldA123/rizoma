@@ -12,7 +12,12 @@ import { Select } from '@/components/ui/select';
 import { SkeletonRows } from '@/components/ui/skeleton';
 import { EmptyState, FailurePanel, WriteResult } from '@/components/salud/states';
 import { classifyApiError, type ApiFailure } from '@/lib/salud-errors';
-import { createPrescription, listPrescriptions } from '@/lib/salud-api';
+import {
+  cancelPrescription,
+  createPrescription,
+  issuePrescription,
+  listPrescriptions,
+} from '@/lib/salud-api';
 
 /**
  * Prescription panel of the ficha 360 — template-based orders (§2.3).
@@ -166,9 +171,21 @@ export function PrescriptionsPanel({
                   <Badge variant={prescriptionStatusVariant(prescription.status)}>
                     {PRESCRIPTION_STATUS_LABELS[prescription.status] ?? prescription.status}
                   </Badge>
-                  <span className="tabular font-mono text-[0.6875rem] text-muted-foreground">
-                    episodio {prescription.episodeId.slice(0, 8)}…
-                  </span>
+                  <PrescriptionRowActions
+                    prescription={prescription}
+                    canWrite={canWrite}
+                    onUpdated={(updated) => {
+                      setPrescriptions((current) =>
+                        (current ?? []).map((row) => (row.id === updated.id ? updated : row)),
+                      );
+                      setWriteFailure(null);
+                      setSuccess(
+                        updated.status === 'issued'
+                          ? 'Receta emitida y registrada en la auditoría del API.'
+                          : 'Receta anulada y registrada en la auditoría del API.',
+                      );
+                    }}
+                  />
                 </div>
                 <ul className="flex flex-col gap-1">
                   {prescription.items.map((item, index) => (
@@ -189,6 +206,84 @@ export function PrescriptionsPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Per-row transitions of a prescription (P4-2b): a `draft` order offers
+ * [Emitir] (`draft → issued`) and [Anular] (`draft → cancelled`); any other
+ * status renders nothing. The API owns the guard (open episode,
+ * `episode.write`); the panel only shows the buttons on a draft, and a
+ * refusal surfaces as the typed denial. Two clicks per move — the button
+ * arms an inline confirmation, the second click runs it.
+ */
+function PrescriptionRowActions({
+  prescription,
+  canWrite,
+  onUpdated,
+}: {
+  readonly prescription: PrescriptionRecord;
+  readonly canWrite: boolean;
+  readonly onUpdated: (updated: PrescriptionRecord) => void;
+}) {
+  const [pending, setPending] = useState<'issued' | 'cancelled' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<ApiFailure | null>(null);
+
+  if (!canWrite || prescription.status !== 'draft') return null;
+
+  async function run(target: 'issued' | 'cancelled'): Promise<void> {
+    setBusy(true);
+    setFailure(null);
+    try {
+      onUpdated(
+        target === 'issued'
+          ? await issuePrescription(prescription.id)
+          : await cancelPrescription(prescription.id),
+      );
+      setPending(null);
+    } catch (error) {
+      setFailure(classifyApiError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (pending !== null) {
+    const question =
+      pending === 'issued' ? '¿Emitir la receta?' : '¿Anular la receta en borrador?';
+    return (
+      <span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>{question}</span>
+        <Button variant="primary" size="sm" disabled={busy} onClick={() => void run(pending)}>
+          {busy ? 'Guardando…' : 'Sí, guardar'}
+        </Button>
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => setPending(null)}>
+          No, volver
+        </Button>
+        {failure === null ? null : (
+          <span role="alert" className="text-danger">
+            No se pudo guardar ({failure.code}). {failure.hint}
+          </span>
+        )}
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <Button variant="outline" size="sm" disabled={busy} onClick={() => setPending('issued')}>
+        Emitir
+      </Button>
+      <Button variant="outline" size="sm" disabled={busy} onClick={() => setPending('cancelled')}>
+        Anular
+      </Button>
+      {failure === null ? null : (
+        <span role="alert" className="text-xs text-danger">
+          No se pudo guardar ({failure.code}). {failure.hint}
+        </span>
+      )}
+    </span>
   );
 }
 
